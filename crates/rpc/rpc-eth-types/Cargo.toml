@@ -38,6 +38,7 @@ alloy-rpc-types-eth.workspace = true
 alloy-network.workspace = true
 revm.workspace = true
 revm-inspectors.workspace = true
+revm-bytecode.workspace = true
 
 # rpc
 jsonrpsee-core.workspace = true
@@ -59,6 +60,11 @@ schnellru.workspace = true
 rand.workspace = true
 tracing.workspace = true
 itertools.workspace = true
+
+md-5.workspace = true
+sha1.workspace = true
+alloy-rlp.workspace = true
+alloy-genesis.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

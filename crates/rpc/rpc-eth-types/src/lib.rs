@@ -10,6 +10,7 @@
 
 pub mod builder;
 pub mod cache;
+pub mod debank;
 pub mod error;
 pub mod fee_history;
 pub mod gas_oracle;
@@ -34,3 +35,9 @@ pub use gas_oracle::{
 pub use id_provider::EthSubscriptionIdProvider;
 pub use pending_block::{PendingBlock, PendingBlockEnv, PendingBlockEnvOrigin};
 pub use transaction::TransactionSource;
+
+pub use debank::{
+    build_debank_traces, get_storage_contracts_from_cache, get_storage_contracts_from_genesis,
+    BlockFile, BlockStorageDiff, DebankBlock, DebankEvent, DebankOutPut, DebankTrace,
+    DebankTransaction,
+};
