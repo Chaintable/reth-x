@@ -13,16 +13,13 @@ use reth_evm::{
     Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock, SignedTransaction};
-use reth_revm::{
-    database::StateProviderDatabase,
-    db::{CacheDB, InMemoryDB},
-};
+use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_eth_types::{
     cache::db::{
         StateCacheDb, StateCacheDbRefMutWrapper, StateDiffDbRefMutWrapper, StateDiffTraceDB,
         StateProviderTraitObjWrapper,
     },
-    get_storage_contracts_from_cache, BlockStorageDiff, EthApiError,
+    get_storage_contracts_from_cache, get_storage_diffs_from_cache, BlockStorageDiff, EthApiError,
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
@@ -498,6 +495,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
                 // now get the state
                 let state = this.state_at_block_id(state_at.into())?;
+                let pre_db =
+                    CacheDB::new(StateProviderDatabase::new(StateProviderTraitObjWrapper(&state)));
                 let mut db = StateDiffTraceDB::new(CacheDB::new(StateProviderDatabase::new(
                     StateProviderTraitObjWrapper(&state),
                 )));
@@ -525,7 +524,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
                 let change_addresses = get_storage_contracts_from_cache(&db.diff.cache);
-                Ok((results, db.diff.cache.into(), change_addresses))
+                Ok((results, get_storage_diffs_from_cache(db.diff.cache, pre_db), change_addresses))
             })
             .await
         }

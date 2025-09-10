@@ -38,6 +38,6 @@ pub use transaction::TransactionSource;
 
 pub use debank::{
     build_debank_traces, get_storage_contracts_from_cache, get_storage_contracts_from_genesis,
-    BlockFile, BlockStorageDiff, DebankBlock, DebankEvent, DebankOutPut, DebankTrace,
-    DebankTransaction,
+    get_storage_diffs_from_cache, BlockFile, BlockStorageDiff, DebankBlock, DebankEvent,
+    DebankOutPut, DebankTrace, DebankTransaction,
 };
