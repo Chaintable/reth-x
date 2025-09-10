@@ -8,7 +8,8 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache};
+use reth_revm::db::{AccountState, Cache, CacheDB};
+use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
 use revm_inspectors::tracing::CallTraceArena;
@@ -99,8 +100,12 @@ impl From<&Genesis> for BlockStorageDiff {
     }
 }
 
-impl From<Cache> for BlockStorageDiff {
-    fn from(cache: Cache) -> Self {
+impl<DB> From<CacheDB<DB>> for BlockStorageDiff
+where
+    DB: DatabaseRef,
+{
+    fn from(cache_db: CacheDB<DB>) -> Self {
+        let cache = cache_db.cache;
         let mut new_accounts = Vec::new();
         let mut deleted_accounts = Vec::new();
         let mut storage_diffs = Vec::new();
@@ -142,6 +147,11 @@ impl From<Cache> for BlockStorageDiff {
         for (code_hash, bytecode) in cache.contracts {
             // Skip empty bytecode and known empty hashes
             if !bytecode.is_empty() && code_hash != KECCAK_EMPTY && code_hash != H256::ZERO {
+                if let Ok(old_bytecodes) = cache_db.db.code_by_hash_ref(code_hash) {
+                    if !old_bytecodes.is_empty() {
+                        continue; // Code already exists in the underlying DB
+                    }
+                }
                 new_codes.push(NewCode { code_hash, code: bytecode.bytes() });
             }
         }
