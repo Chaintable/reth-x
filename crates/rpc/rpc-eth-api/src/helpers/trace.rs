@@ -13,9 +13,15 @@ use reth_evm::{
     Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock, SignedTransaction};
-use reth_revm::{database::StateProviderDatabase, db::CacheDB};
+use reth_revm::{
+    database::StateProviderDatabase,
+    db::{CacheDB, InMemoryDB},
+};
 use reth_rpc_eth_types::{
-    cache::db::{StateCacheDb, StateCacheDbRefMutWrapper, StateProviderTraitObjWrapper},
+    cache::db::{
+        StateCacheDb, StateCacheDbRefMutWrapper, StateDiffDbRefMutWrapper, StateDiffTraceDB,
+        StateProviderTraitObjWrapper,
+    },
     get_storage_contracts_from_cache, BlockStorageDiff, EthApiError,
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
@@ -460,13 +466,13 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
-                    EvmFor<Self::Evm, StateCacheDbRefMutWrapper<'_, '_>, Insp>,
+                    EvmFor<Self::Evm, StateDiffDbRefMutWrapper<'_, '_>, Insp>,
                 >,
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
-        Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateCacheDbRefMutWrapper<'a, 'b>>,
+        Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateDiffDbRefMutWrapper<'a, 'b>>,
         R: Send + 'static,
     {
         async move {
@@ -492,8 +498,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
                 // now get the state
                 let state = this.state_at_block_id(state_at.into())?;
-                let mut db =
-                    CacheDB::new(StateProviderDatabase::new(StateProviderTraitObjWrapper(&state)));
+                let mut db = StateDiffTraceDB::new(CacheDB::new(StateProviderDatabase::new(
+                    StateProviderTraitObjWrapper(&state),
+                )));
 
                 this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
 
@@ -502,7 +509,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let results = this
                     .evm_config()
                     .evm_factory()
-                    .create_tracer(StateCacheDbRefMutWrapper(&mut db), evm_env, inspector_setup())
+                    .create_tracer(StateDiffDbRefMutWrapper(&mut db), evm_env, inspector_setup())
                     .try_trace_many(block.transactions_recovered(), |ctx| {
                         let tx_info = TransactionInfo {
                             hash: Some(*ctx.tx.tx_hash()),
@@ -517,8 +524,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     })
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
-                let change_addresses = get_storage_contracts_from_cache(&db.cache);
-                Ok((results, db.cache.into(), change_addresses))
+                let change_addresses = get_storage_contracts_from_cache(&db.diff.cache);
+                Ok((results, db.diff.cache.into(), change_addresses))
             })
             .await
         }
