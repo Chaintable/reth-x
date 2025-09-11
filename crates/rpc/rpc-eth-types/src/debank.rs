@@ -423,7 +423,7 @@ impl From<&CallTraceNode> for DebankTrace {
         }
         let mut call_type = "".to_string();
         if call_create_type == "call" {
-            call_type = trace.kind.to_string();
+            call_type = trace.kind.to_string().to_lowercase();
         }
         let mut debank_trace = DebankTrace {
             id: "".to_string(),
