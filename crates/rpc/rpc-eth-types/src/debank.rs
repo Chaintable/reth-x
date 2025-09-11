@@ -409,6 +409,22 @@ impl DebankID for DebankTrace {
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
+        let mut call_create_type = match trace.kind {
+            CallKind::Call
+            | CallKind::StaticCall
+            | CallKind::CallCode
+            | CallKind::DelegateCall
+            | CallKind::AuthCall => "call".to_string(),
+            CallKind::Create => "create".to_string(),
+            CallKind::Create2 => "create2".to_string(),
+        };
+        if call_trace.is_selfdestruct() {
+            call_create_type = "suicide".to_string();
+        }
+        let mut call_type = "".to_string();
+        if call_create_type == "call" {
+            call_type = trace.kind.to_string();
+        }
         let mut debank_trace = DebankTrace {
             id: "".to_string(),
             from_addr: trace.caller,
@@ -418,15 +434,8 @@ impl From<&CallTraceNode> for DebankTrace {
             value: trace.value,
             gas_used: trace.gas_used,
             output: trace.output.clone(),
-            call_create_type: match trace.kind {
-                CallKind::Call
-                | CallKind::StaticCall
-                | CallKind::CallCode
-                | CallKind::DelegateCall
-                | CallKind::AuthCall => "call".to_string(),
-                CallKind::Create | CallKind::Create2 => "create".to_string(),
-            },
-            call_type: trace.kind.to_string(),
+            call_create_type,
+            call_type,
             subtraces: call_trace.children.len(),
             ..Default::default()
         };
