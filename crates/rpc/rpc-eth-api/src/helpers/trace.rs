@@ -484,7 +484,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
             };
 
             // replay all transactions of the block
-            self.spawn_tracing(move |this| {
+            self.spawn_blocking_io_fut(move |this| async move {
                 // we need to get the state of the parent block because we're replaying this block
                 // on top of its parent block's state
                 let state_at = block.parent_hash();
@@ -494,7 +494,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                 let base_fee = evm_env.block_env.basefee;
 
                 // now get the state
-                let state = this.state_at_block_id(state_at.into())?;
+                let state = this.state_at_block_id(state_at.into()).await?;
                 let pre_db =
                     CacheDB::new(StateProviderDatabase::new(StateProviderTraitObjWrapper(&state)));
                 let mut db = StateDiffTraceDB::new(CacheDB::new(StateProviderDatabase::new(
