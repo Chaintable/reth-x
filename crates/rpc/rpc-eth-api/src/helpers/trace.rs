@@ -3,7 +3,7 @@
 use super::{Call, LoadBlock, LoadPendingBlock, LoadState, LoadTransaction};
 use crate::FromEvmError;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
 use reth_chainspec::ChainSpecProvider;
@@ -15,8 +15,11 @@ use reth_evm::{
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock, SignedTransaction};
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_eth_types::{
-    cache::db::{StateCacheDb, StateCacheDbRefMutWrapper, StateProviderTraitObjWrapper},
-    EthApiError,
+    cache::db::{
+        StateCacheDb, StateCacheDbRefMutWrapper, StateDiffDbRefMutWrapper, StateDiffTraceDB,
+        StateProviderTraitObjWrapper,
+    },
+    get_storage_contracts_from_cache, get_storage_diffs_from_cache, BlockStorageDiff, EthApiError,
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
@@ -280,7 +283,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         async move {
             let block = async {
                 if block.is_some() {
-                    return Ok(block)
+                    return Ok(block);
                 }
                 self.recovered_block(block_id).await
             };
@@ -291,7 +294,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
             if block.body().transactions().is_empty() {
                 // nothing to trace
-                return Ok(Some(Vec::new()))
+                return Ok(Some(Vec::new()));
             }
 
             // replay all transactions of the block
@@ -445,5 +448,85 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         })?;
 
         Ok(())
+    }
+
+    fn trace_all_block<Setup, Insp, F, R>(
+        &self,
+        block_id: BlockId,
+        mut inspector_setup: Setup,
+        f: F,
+    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff, Vec<Address>), Self::Error>> + Send
+    where
+        Self: LoadBlock,
+        F: Fn(
+                TransactionInfo,
+                TracingCtx<
+                    '_,
+                    Recovered<&ProviderTx<Self::Provider>>,
+                    EvmFor<Self::Evm, StateDiffDbRefMutWrapper<'_, '_>, Insp>,
+                >,
+            ) -> Result<R, Self::Error>
+            + Send
+            + 'static,
+        Setup: FnMut() -> Insp + Send + 'static,
+        Insp: Clone + for<'a, 'b> InspectorFor<Self::Evm, StateDiffDbRefMutWrapper<'a, 'b>>,
+        R: Send + 'static,
+    {
+        async move {
+            let block = self.recovered_block(block_id);
+
+            let ((evm_env, _), block) = futures::try_join!(self.evm_env_at(block_id), block)?;
+
+            let Some(block) = block else {
+                return Err(
+                    EthApiError::EvmCustom(format!("cannot find block {}", block_id)).into()
+                );
+            };
+
+            // replay all transactions of the block
+            self.spawn_blocking_io_fut(move |this| async move {
+                // we need to get the state of the parent block because we're replaying this block
+                // on top of its parent block's state
+                let state_at = block.parent_hash();
+                let block_hash = block.hash();
+
+                let block_number = evm_env.block_env.number.saturating_to();
+                let base_fee = evm_env.block_env.basefee;
+
+                // now get the state
+                let state = this.state_at_block_id(state_at.into()).await?;
+                let pre_db =
+                    CacheDB::new(StateProviderDatabase::new(StateProviderTraitObjWrapper(&state)));
+                let mut db = StateDiffTraceDB::new(CacheDB::new(StateProviderDatabase::new(
+                    StateProviderTraitObjWrapper(&state),
+                )));
+
+                this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+
+                let mut idx = 0;
+
+                let results = this
+                    .evm_config()
+                    .evm_factory()
+                    .create_tracer(StateDiffDbRefMutWrapper(&mut db), evm_env, inspector_setup())
+                    .try_trace_many(block.transactions_recovered(), |ctx| {
+                        let tx_info = TransactionInfo {
+                            hash: Some(*ctx.tx.tx_hash()),
+                            index: Some(idx),
+                            block_hash: Some(block_hash),
+                            block_number: Some(block_number),
+                            base_fee: Some(base_fee),
+                        };
+                        idx += 1;
+
+                        f(tx_info, ctx)
+                    })
+                    .commit_last_tx()
+                    .collect::<Result<_, _>>()?;
+                let change_addresses = get_storage_contracts_from_cache(&db.diff.cache);
+                Ok((results, get_storage_diffs_from_cache(db.diff.cache, pre_db), change_addresses))
+            })
+            .await
+        }
     }
 }
