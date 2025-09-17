@@ -5584,6 +5584,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9972,6 +9982,7 @@ dependencies = [
  "reth-engine-primitives",
  "reth-network-peers",
  "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
  "reth-trie-common",
 ]
 
@@ -10178,8 +10189,10 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
+ "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
@@ -10189,6 +10202,7 @@ dependencies = [
  "itertools 0.14.0",
  "jsonrpsee-core",
  "jsonrpsee-types",
+ "md-5",
  "metrics",
  "rand 0.9.2",
  "reqwest",
@@ -10208,10 +10222,12 @@ dependencies = [
  "reth-transaction-pool",
  "reth-trie",
  "revm",
+ "revm-bytecode",
  "revm-inspectors",
  "schnellru",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror 2.0.16",
  "tokio",
  "tokio-stream",

@@ -7,7 +7,7 @@ use alloy_primitives::{
 };
 use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
-    BlockOverrides, Index,
+    BlockOverrides, Header, Index,
 };
 use alloy_rpc_types_trace::{
     filter::TraceFilter,
@@ -24,10 +24,16 @@ use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_api::TraceApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{Call, LoadPendingBlock, LoadTransaction, Trace, TraceExt},
+    helpers::{
+        block::EthBlocks, Call, LoadPendingBlock, LoadReceipt, LoadTransaction, Trace, TraceExt,
+    },
     FromEthApiError, RpcNodeCore,
 };
-use reth_rpc_eth_types::{error::EthApiError, utils::recover_raw_transaction, EthConfig};
+use reth_rpc_eth_types::{
+    build_debank_traces, error::EthApiError, get_storage_contracts_from_genesis,
+    utils::recover_raw_transaction, BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut,
+    DebankTransaction, EthConfig,
+};
 use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_transaction_pool::{PoolPooledTx, PoolTransaction, TransactionPool};
@@ -227,7 +233,7 @@ where
     ) -> Result<Option<LocalizedTransactionTrace>, Eth::Error> {
         if indices.len() != 1 {
             // The OG impl failed if it gets more than a single index
-            return Ok(None)
+            return Ok(None);
         }
         self.trace_get_index(hash, indices[0]).await
     }
@@ -301,7 +307,7 @@ where
         };
 
         if is_paris_activated {
-            return Ok(None)
+            return Ok(None);
         }
 
         Ok(Some(base_block_reward_pre_merge(&chain_spec, header.number())))
@@ -376,7 +382,7 @@ where
             return Err(EthApiError::InvalidParams(
                 "invalid parameters: fromBlock cannot be greater than toBlock".to_string(),
             )
-            .into())
+            .into());
         }
 
         // ensure that the range is not too large, since we need to fetch all blocks in the range
@@ -385,7 +391,7 @@ where
             return Err(EthApiError::InvalidParams(
                 "Block range too large; currently limited to 100 blocks".to_string(),
             )
-            .into())
+            .into());
         }
 
         // fetch all blocks in that range
@@ -440,7 +446,7 @@ where
             } else {
                 // no block reward, means we're past the Paris hardfork and don't expect any rewards
                 // because the blocks in ascending order
-                break
+                break;
             }
         }
 
@@ -451,7 +457,7 @@ where
             if after < all_traces.len() {
                 all_traces.drain(..after);
             } else {
-                return Ok(vec![])
+                return Ok(vec![]);
             }
         }
 
@@ -608,10 +614,137 @@ where
     }
 }
 
+impl<Eth> TraceApi<Eth>
+where
+    // tracing methods read from mempool, hence `LoadBlock` trait bound via
+    // `TraceExt`
+    Eth: TraceExt + 'static + EthBlocks + LoadReceipt,
+{
+    pub async fn trace_debank_block(&self, block_id: BlockId) -> Result<DebankOutPut, Eth::Error> {
+        let block = self.eth_api().recovered_block(block_id).await?;
+        let Some(block) = block else { return Err(EthApiError::HeaderNotFound(block_id).into()) };
+        let debank_block: DebankBlock = block.as_ref().into();
+        let debank_header = Header {
+            inner: alloy_consensus::Header {
+                parent_hash: block.header().parent_hash(),
+                ommers_hash: block.header().ommers_hash(),
+                beneficiary: block.header().beneficiary(),
+                state_root: block.header().state_root(),
+                transactions_root: block.header().transactions_root(),
+                receipts_root: block.header().receipts_root(),
+                logs_bloom: block.header().logs_bloom(),
+                difficulty: block.header().difficulty(),
+                number: block.header().number(),
+                gas_limit: block.header().gas_limit(),
+                gas_used: block.header().gas_used(),
+                timestamp: block.header().timestamp(),
+                extra_data: block.header().extra_data().clone(),
+                mix_hash: block.header().mix_hash().unwrap_or_default(),
+                nonce: block.header().nonce().unwrap_or_default(),
+                base_fee_per_gas: block.header().base_fee_per_gas(),
+                withdrawals_root: block.header().withdrawals_root(),
+                blob_gas_used: block.header().blob_gas_used(),
+                excess_blob_gas: block.header().excess_blob_gas(),
+                parent_beacon_block_root: block.header().parent_beacon_block_root(),
+                requests_hash: block.header().requests_hash(),
+            },
+            hash: block.hash(),
+            total_difficulty: None,
+            size: None,
+        };
+        if block.number() == 0 {
+            let mut state_diff: BlockStorageDiff = self.provider().chain_spec().genesis().into();
+            let genesis_hash = self.provider().chain_spec().genesis_hash();
+            state_diff.hash = genesis_hash;
+            let block_file = BlockFile {
+                block: debank_block,
+                storage_contracts: get_storage_contracts_from_genesis(
+                    self.provider().chain_spec().genesis(),
+                ),
+                ..Default::default()
+            };
+            let validation_hash = block_file.validation().validation_hash;
+            return Ok(DebankOutPut {
+                block_file,
+                header: debank_header,
+                state_diff: alloy_rlp::encode(state_diff).into(),
+                validation_hash,
+            });
+        }
+
+        let receipts = self.eth_api().block_receipts(block_id).await?;
+        let mut debank_txs: Vec<DebankTransaction> =
+            Vec::with_capacity(block.body().transactions().len());
+        let Some(receipts) = receipts else {
+            return Err(EthApiError::HeaderNotFound(block_id).into());
+        };
+        for index in 0..block.body().transactions().len() {
+            let tx = &block.body().transactions()[index];
+            let receipt = &receipts[index];
+            let debank_tx: DebankTransaction = (receipt, tx).into();
+            debank_txs.push(debank_tx);
+        }
+
+        let parent_block = self.eth_api().recovered_block(block.parent_hash().into()).await?;
+        let Some(parent_block) = parent_block else {
+            return Err(EthApiError::HeaderNotFound(block_id).into());
+        };
+        let mut block_file =
+            BlockFile { block: debank_block, transactions: debank_txs, ..Default::default() };
+        if parent_block.state_root() == block.state_root() {
+            let state_diff = BlockStorageDiff {
+                hash: block.state_root(),
+                parent_hash: parent_block.state_root(),
+                ..Default::default()
+            };
+            let validation_hash = block_file.validation().validation_hash;
+            return Ok(DebankOutPut {
+                block_file,
+                header: debank_header,
+                state_diff: alloy_rlp::encode(state_diff).into(),
+                validation_hash,
+            });
+        }
+        let (mut traces, mut state_diff, change_addresses) = self
+            .eth_api()
+            .trace_all_block(
+                block_id,
+                || {
+                    TracingInspector::new(
+                        TracingInspectorConfig::default_parity().set_record_logs(true),
+                    )
+                },
+                move |tx_info, mut ctx| {
+                    Ok(build_debank_traces(
+                        tx_info.hash.unwrap(),
+                        ctx.take_inspector().into_traces(),
+                    ))
+                },
+            )
+            .await?;
+        for (trace, error_trace, event, error_event) in traces.drain(..) {
+            block_file.traces.extend(trace);
+            block_file.error_traces.extend(error_trace);
+            block_file.events.extend(event);
+            block_file.error_events.extend(error_event);
+        }
+        block_file.storage_contracts = change_addresses;
+        let validation_hash = block_file.validation().validation_hash;
+        state_diff.hash = block.state_root();
+        state_diff.parent_hash = parent_block.state_root();
+        Ok(DebankOutPut {
+            block_file,
+            header: debank_header,
+            state_diff: alloy_rlp::encode(state_diff).into(),
+            validation_hash,
+        })
+    }
+}
+
 #[async_trait]
 impl<Eth> TraceApiServer<RpcTxReq<Eth::NetworkTypes>> for TraceApi<Eth>
 where
-    Eth: TraceExt + 'static,
+    Eth: TraceExt + EthBlocks + LoadReceipt + 'static,
 {
     /// Executes the given call and returns a number of possible traces for it.
     ///
@@ -729,6 +862,11 @@ where
     async fn trace_block_opcode_gas(&self, block_id: BlockId) -> RpcResult<Option<BlockOpcodeGas>> {
         let _permit = self.acquire_trace_permit().await;
         Ok(Self::trace_block_opcode_gas(self, block_id).await.map_err(Into::into)?)
+    }
+
+    async fn trace_debank_block(&self, block_id: BlockId) -> RpcResult<DebankOutPut> {
+        let _permit = self.acquire_trace_permit().await;
+        Ok(Self::trace_debank_block(self, block_id).await.map_err(Into::into)?)
     }
 }
 
