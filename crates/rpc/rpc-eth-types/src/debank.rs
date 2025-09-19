@@ -99,7 +99,7 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
                     continue; // Code already exists in the previous state
                 }
             }
-            new_codes.push(NewCode { code_hash, code: code.bytes() });
+            new_codes.push(NewCode { code_hash, code: code.original_bytes() });
         }
     }
 
