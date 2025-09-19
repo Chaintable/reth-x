@@ -8,7 +8,8 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache, CacheDB};
+use reth_revm::db::{AccountState, Cache};
+use revm::interpreter::InstructionResult;
 use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
@@ -16,7 +17,6 @@ use revm_inspectors::tracing::CallTraceArena;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
-use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -406,6 +406,30 @@ impl DebankID for DebankTrace {
     }
 }
 
+pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
+    if res.is_ok() {
+        return None;
+    }
+    let msg = match res {
+        InstructionResult::Revert => "Reverted".to_string(),
+        InstructionResult::OutOfGas
+        | InstructionResult::PrecompileOOG
+        | InstructionResult::MemoryOOG
+        | InstructionResult::MemoryLimitOOG
+        | InstructionResult::InvalidOperandOOG
+        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
+        InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
+            "Bad instruction".to_string()
+        }
+        InstructionResult::StackOverflow => "Out of stack".to_string(),
+        InstructionResult::InvalidJump => "Bad jump destination".to_string(),
+        InstructionResult::PrecompileError => "Built-in failed".to_string(),
+        status => format!("{status:?}"),
+    };
+    Some(msg)
+}
+
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
@@ -425,6 +449,7 @@ impl From<&CallTraceNode> for DebankTrace {
         if call_create_type == "call" {
             call_type = trace.kind.to_string().to_lowercase();
         }
+        let error = trace.status.and_then(fmt_error_msg);
         let mut debank_trace = DebankTrace {
             id: "".to_string(),
             from_addr: trace.caller,
@@ -437,6 +462,7 @@ impl From<&CallTraceNode> for DebankTrace {
             call_create_type,
             call_type,
             subtraces: call_trace.children.len(),
+            error: error.unwrap_or_default(),
             ..Default::default()
         };
         if call_trace.is_selfdestruct() {
@@ -461,7 +487,13 @@ impl From<&CallLog> for DebankEvent {
             vec![]
         };
 
-        DebankEvent { selector, topics, data: log.raw_log.data.clone(), ..Default::default() }
+        DebankEvent {
+            selector,
+            topics,
+            data: log.raw_log.data.clone(),
+            idx: log.index as usize,
+            ..Default::default()
+        }
     }
 }
 
@@ -503,9 +535,6 @@ fn build_trace_node(
         match &pos {
             TraceMemberOrder::Call(i) => {
                 let child_node = &nodes[node.children[*i]];
-                if !child_node.trace.success {
-                    continue;
-                }
                 let mut trace_address = trace_address.clone();
                 trace_address.push(*i);
                 let child_trace = build_trace_node(
@@ -514,10 +543,10 @@ fn build_trace_node(
                     debank_node.children.len(),
                     child_node,
                     nodes,
-                    debank_node.success,
+                    parent_success && debank_node.success,
                     trace_address,
                 );
-                if child_trace.trace.storage_change {
+                if child_trace.trace.storage_change && child_node.trace.success {
                     debank_node.trace.storage_change = true;
                 }
                 debank_node.children.push(DebankTraceOrLog::Trace(child_trace));
