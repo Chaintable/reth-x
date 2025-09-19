@@ -12,7 +12,9 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::utils::recover_raw_transaction;
 use reth_storage_api::{errors::ProviderError, ReceiptProvider};
-use reth_transaction_pool::{PoolTransaction, TransactionOrigin, TransactionPool};
+use reth_transaction_pool::{
+    AddedTransactionOutcome, PoolTransaction, TransactionOrigin, TransactionPool,
+};
 use std::fmt::{Debug, Formatter};
 
 impl<N, Rpc> EthTransactions for OpEthApi<N, Rpc>
@@ -44,18 +46,15 @@ where
                 })?;
 
             // Retain tx in local tx pool after forwarding, for local RPC usage.
-            let _ = self
-                .pool()
-                .add_transaction(TransactionOrigin::Local, pool_transaction)
-                .await.inspect_err(|err| {
-                    tracing::warn!(target: "rpc::eth", %err, %hash, "successfully sent tx to sequencer, but failed to persist in local tx pool");
+            let _ = self.inner.eth_api.add_pool_transaction(pool_transaction).await.inspect_err(|err| {
+                tracing::warn!(target: "rpc::eth", %err, %hash, "successfully sent tx to sequencer, but failed to persist in local tx pool");
             });
 
             return Ok(hash)
         }
 
         // submit the transaction to the pool with a `Local` origin
-        let hash = self
+        let AddedTransactionOutcome { hash, .. } = self
             .pool()
             .add_transaction(TransactionOrigin::Local, pool_transaction)
             .await
@@ -110,7 +109,7 @@ impl<Provider> OpTxInfoMapper<Provider> {
     }
 }
 
-impl<T, Provider> TxInfoMapper<&T> for OpTxInfoMapper<Provider>
+impl<T, Provider> TxInfoMapper<T> for OpTxInfoMapper<Provider>
 where
     T: OpTransaction + SignedTransaction,
     Provider: ReceiptProvider<Receipt: DepositReceipt>,
