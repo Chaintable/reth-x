@@ -432,7 +432,7 @@ pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
-        let mut call_create_type = match trace.kind {
+        let call_create_type = match trace.kind {
             CallKind::Call
             | CallKind::StaticCall
             | CallKind::CallCode
@@ -441,9 +441,6 @@ impl From<&CallTraceNode> for DebankTrace {
             CallKind::Create => "create".to_string(),
             CallKind::Create2 => "create2".to_string(),
         };
-        if call_trace.is_selfdestruct() {
-            call_create_type = "suicide".to_string();
-        }
         let mut call_type = "".to_string();
         if call_create_type == "call" {
             call_type = trace.kind.to_string().to_lowercase();
@@ -464,13 +461,11 @@ impl From<&CallTraceNode> for DebankTrace {
             error: error.unwrap_or_default(),
             ..Default::default()
         };
-        if call_trace.is_selfdestruct() {
-            debank_trace.call_create_type = "suicide".to_string();
-        }
         for op in trace.steps.iter() {
             if op.op == OpCode::SSTORE {
                 debank_trace.self_storage_change = true;
                 debank_trace.storage_change = true;
+                break;
             }
         }
         debank_trace
@@ -525,12 +520,14 @@ fn build_trace_node(
     let id = debank_node.trace.id.clone();
     let contract_id = node.execution_address();
 
+    let mut child_trace_address = Vec::new();
     for pos in node.ordering.iter() {
         match &pos {
             TraceMemberOrder::Call(i) => {
                 let child_node = &nodes[node.children[*i]];
                 let mut trace_address = trace_address.clone();
                 trace_address.push(*i);
+                child_trace_address = trace_address.clone();
                 let child_trace = build_trace_node(
                     tx_id,
                     id.clone(),
@@ -560,6 +557,30 @@ fn build_trace_node(
             }
             _ => {}
         }
+    }
+    // selfdestructs are not recorded as individual call traces but are derived from
+    // the call trace and are added as additional `TransactionTrace` objects in the
+    // trace array
+    if node.is_selfdestruct() {
+        child_trace_address.last_mut().map(|last| *last += 1);
+        debank_node.trace.subtraces += 1;
+        let mut selfdestruct_trace = DebankTrace {
+            from_addr: node.trace.selfdestruct_address.unwrap_or_default(),
+            to_addr: node.trace.selfdestruct_refund_target.unwrap_or_default(),
+            value: node.trace.selfdestruct_transferred_value.unwrap_or_default(),
+            trace_address: child_trace_address,
+            parent_trace_id: id.clone(),
+            pos_in_parent_trace: debank_node.children.len(),
+            tx_id,
+            call_create_type: "suicide".to_string(),
+            ..Default::default()
+        };
+        selfdestruct_trace.id = selfdestruct_trace.debank_id();
+        debank_node.children.push(DebankTraceOrLog::Trace(DebankTraceNode {
+            trace: selfdestruct_trace,
+            children: vec![],
+            success: parent_success && debank_node.success,
+        }));
     }
     debank_node
 }
