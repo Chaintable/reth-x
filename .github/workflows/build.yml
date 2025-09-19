@@ -72,6 +72,6 @@ jobs:
       - name: Docker build and push op-reth-x
         run: |
           git submodule update --init --recursive
-          docker build -t ${REGISTRY}/blockchain/${OP_IMAGE}:${{ matrix.arch }}-${REVISION} -f ${OP_DOCKERFILE} .
-          docker push ${REGISTRY}/blockchain/${OP_IMAGE}:${{ matrix.arch }}-${REVISION}
+          docker build -t ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION} -f ${OP_DOCKERFILE} .
+          docker push ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION}
           
