@@ -17,6 +17,7 @@ use revm_inspectors::tracing::CallTraceArena;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
+use reth_trie::EMPTY_ROOT_HASH;
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -150,7 +151,7 @@ impl From<&Genesis> for BlockStorageDiff {
 
         BlockStorageDiff {
             hash: H256::ZERO, // These will need to be set by the caller
-            parent_hash: KECCAK_EMPTY,
+            parent_hash: EMPTY_ROOT_HASH,
             new_accounts,
             deleted_accounts: vec![],
             storage_diffs,
