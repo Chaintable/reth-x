@@ -8,8 +8,10 @@ on:
 
 env:
   REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
-  IMAGE: reth-x
+  IMAGE: blockchain-rethx
+  OP_IMAGE: blockchain-op-rethx
   DOCKERFILE: Dockerfile
+  OP_DOCKERFILE: DockerfileOp
   AWS_REGION: ap-northeast-1
   
 jobs:
@@ -42,4 +44,34 @@ jobs:
           git submodule update --init --recursive
           docker build -t ${REGISTRY}/${IMAGE}:${{ matrix.arch }}-${REVISION} -f ${DOCKERFILE} .
           docker push ${REGISTRY}/${IMAGE}:${{ matrix.arch }}-${REVISION}
+
+  build-op-artifacts:
+    strategy:
+      matrix:
+        arch: [ amd64 ]
+    runs-on: [self-hosted, "${{ matrix.arch }}"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set env
+        run: |
+          echo "REVISION=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker build and push op-reth-x
+        run: |
+          git submodule update --init --recursive
+          docker build -t ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION} -f ${OP_DOCKERFILE} .
+          docker push ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION}
           
