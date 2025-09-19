@@ -705,6 +705,7 @@ where
                 validation_hash,
             });
         }
+        let log_index = std::cell::RefCell::new(0);
         let (mut traces, mut state_diff, change_addresses) = self
             .eth_api()
             .trace_all_block(
@@ -720,6 +721,7 @@ where
                     Ok(build_debank_traces(
                         tx_info.hash.unwrap(),
                         ctx.take_inspector().into_traces(),
+                        &log_index,
                     ))
                 },
             )
