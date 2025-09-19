@@ -711,7 +711,9 @@ where
                 block_id,
                 || {
                     TracingInspector::new(
-                        TracingInspectorConfig::default_parity().set_record_logs(true),
+                        TracingInspectorConfig::default_parity()
+                            .set_record_logs(true)
+                            .set_exclude_precompile_calls(false),
                     )
                 },
                 move |tx_info, mut ctx| {

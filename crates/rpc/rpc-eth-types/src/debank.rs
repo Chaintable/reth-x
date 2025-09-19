@@ -220,7 +220,7 @@ pub struct DebankBlock {
     pub gas_limit: u64,
     pub gas_used: u64,
     pub timestamp: u64,
-    pub process_start_timestamp: u64,
+    pub process_start_timestamp: u128,
 }
 
 impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
@@ -237,7 +237,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
             process_start_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs(),
+                .as_millis(),
         }
     }
 }
