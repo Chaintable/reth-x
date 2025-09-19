@@ -715,6 +715,7 @@ where
                 block_id,
                 || {
                     let mut trace_cfg = TracingInspectorConfig::default_parity()
+                        .set_steps(true)
                         .set_record_logs(true)
                         .set_exclude_precompile_calls(false);
                     trace_cfg.record_opcodes_filter =
