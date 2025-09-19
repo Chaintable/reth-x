@@ -37,11 +37,14 @@ use reth_rpc_eth_types::{
 use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_transaction_pool::{PoolPooledTx, PoolTransaction, TransactionPool};
+use revm::bytecode::OpCode;
 use revm::DatabaseCommit;
 use revm_inspectors::{
     opcode::OpcodeGasInspector,
     storage::StorageInspector,
-    tracing::{parity::populate_state_diff, TracingInspector, TracingInspectorConfig},
+    tracing::{
+        parity::populate_state_diff, OpcodeFilter, TracingInspector, TracingInspectorConfig,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -705,19 +708,25 @@ where
                 validation_hash,
             });
         }
+        let log_index = std::cell::RefCell::new(0);
         let (mut traces, mut state_diff, change_addresses) = self
             .eth_api()
             .trace_all_block(
                 block_id,
                 || {
-                    TracingInspector::new(
-                        TracingInspectorConfig::default_parity().set_record_logs(true),
-                    )
+                    let mut trace_cfg = TracingInspectorConfig::default_parity()
+                        .set_steps(true)
+                        .set_record_logs(true)
+                        .set_exclude_precompile_calls(false);
+                    trace_cfg.record_opcodes_filter =
+                        Some(OpcodeFilter::new().enabled(OpCode::SSTORE));
+                    TracingInspector::new(trace_cfg)
                 },
                 move |tx_info, mut ctx| {
                     Ok(build_debank_traces(
                         tx_info.hash.unwrap(),
                         ctx.take_inspector().into_traces(),
+                        &log_index,
                     ))
                 },
             )

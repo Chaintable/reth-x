@@ -8,7 +8,8 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache, CacheDB};
+use reth_revm::db::{AccountState, Cache};
+use revm::interpreter::InstructionResult;
 use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
@@ -16,7 +17,6 @@ use revm_inspectors::tracing::CallTraceArena;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
-use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -220,7 +220,7 @@ pub struct DebankBlock {
     pub gas_limit: u64,
     pub gas_used: u64,
     pub timestamp: u64,
-    pub process_start_timestamp: u64,
+    pub process_start_timestamp: u128,
 }
 
 impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
@@ -237,7 +237,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
             process_start_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs(),
+                .as_millis(),
         }
     }
 }
@@ -298,7 +298,6 @@ pub struct DebankEvent {
     pub selector: String,
     pub topics: Vec<String>,
     pub data: Bytes,
-    pub tx_id: H256,
     pub parent_trace_id: String,
     pub pos_in_parent_trace: usize,
     pub idx: usize,
@@ -406,10 +405,34 @@ impl DebankID for DebankTrace {
     }
 }
 
+pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
+    if res.is_ok() {
+        return None;
+    }
+    let msg = match res {
+        InstructionResult::Revert => "Reverted".to_string(),
+        InstructionResult::OutOfGas
+        | InstructionResult::PrecompileOOG
+        | InstructionResult::MemoryOOG
+        | InstructionResult::MemoryLimitOOG
+        | InstructionResult::InvalidOperandOOG
+        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
+        InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
+            "Bad instruction".to_string()
+        }
+        InstructionResult::StackOverflow => "Out of stack".to_string(),
+        InstructionResult::InvalidJump => "Bad jump destination".to_string(),
+        InstructionResult::PrecompileError => "Built-in failed".to_string(),
+        status => format!("{status:?}"),
+    };
+    Some(msg)
+}
+
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
-        let mut call_create_type = match trace.kind {
+        let call_create_type = match trace.kind {
             CallKind::Call
             | CallKind::StaticCall
             | CallKind::CallCode
@@ -418,13 +441,11 @@ impl From<&CallTraceNode> for DebankTrace {
             CallKind::Create => "create".to_string(),
             CallKind::Create2 => "create2".to_string(),
         };
-        if call_trace.is_selfdestruct() {
-            call_create_type = "suicide".to_string();
-        }
         let mut call_type = "".to_string();
         if call_create_type == "call" {
             call_type = trace.kind.to_string().to_lowercase();
         }
+        let error = trace.status.and_then(fmt_error_msg);
         let mut debank_trace = DebankTrace {
             id: "".to_string(),
             from_addr: trace.caller,
@@ -437,15 +458,14 @@ impl From<&CallTraceNode> for DebankTrace {
             call_create_type,
             call_type,
             subtraces: call_trace.children.len(),
+            error: error.unwrap_or_default(),
             ..Default::default()
         };
-        if call_trace.is_selfdestruct() {
-            debank_trace.call_create_type = "suicide".to_string();
-        }
         for op in trace.steps.iter() {
             if op.op == OpCode::SSTORE {
                 debank_trace.self_storage_change = true;
                 debank_trace.storage_change = true;
+                break;
             }
         }
         debank_trace
@@ -484,6 +504,7 @@ fn build_trace_node(
     nodes: &Vec<CallTraceNode>,
     parent_success: bool,
     trace_address: Vec<usize>,
+    log_index: &mut usize,
 ) -> DebankTraceNode {
     let mut debank_node = DebankTraceNode {
         trace: node.into(),
@@ -499,25 +520,25 @@ fn build_trace_node(
     let id = debank_node.trace.id.clone();
     let contract_id = node.execution_address();
 
+    let mut child_trace_address = Vec::new();
     for pos in node.ordering.iter() {
         match &pos {
             TraceMemberOrder::Call(i) => {
                 let child_node = &nodes[node.children[*i]];
-                if !child_node.trace.success {
-                    continue;
-                }
                 let mut trace_address = trace_address.clone();
                 trace_address.push(*i);
+                child_trace_address = trace_address.clone();
                 let child_trace = build_trace_node(
                     tx_id,
                     id.clone(),
                     debank_node.children.len(),
                     child_node,
                     nodes,
-                    debank_node.success,
+                    parent_success && debank_node.success,
                     trace_address,
+                    log_index,
                 );
-                if child_trace.trace.storage_change {
+                if child_trace.trace.storage_change && child_node.trace.success {
                     debank_node.trace.storage_change = true;
                 }
                 debank_node.children.push(DebankTraceOrLog::Trace(child_trace));
@@ -526,13 +547,40 @@ fn build_trace_node(
                 let mut child_event: DebankEvent = (&node.logs[*i]).into();
                 child_event.pos_in_parent_trace = debank_node.children.len();
                 child_event.contract_id = contract_id;
-                child_event.tx_id = tx_id;
                 child_event.parent_trace_id = id.clone();
                 child_event.id = child_event.debank_id();
+                child_event.idx = *log_index;
+                if debank_node.success {
+                    *log_index += 1;
+                }
                 debank_node.children.push(DebankTraceOrLog::Log(child_event));
             }
             _ => {}
         }
+    }
+    // selfdestructs are not recorded as individual call traces but are derived from
+    // the call trace and are added as additional `TransactionTrace` objects in the
+    // trace array
+    if node.is_selfdestruct() {
+        child_trace_address.last_mut().map(|last| *last += 1);
+        debank_node.trace.subtraces += 1;
+        let mut selfdestruct_trace = DebankTrace {
+            from_addr: node.trace.selfdestruct_address.unwrap_or_default(),
+            to_addr: node.trace.selfdestruct_refund_target.unwrap_or_default(),
+            value: node.trace.selfdestruct_transferred_value.unwrap_or_default(),
+            trace_address: child_trace_address,
+            parent_trace_id: id.clone(),
+            pos_in_parent_trace: debank_node.children.len(),
+            tx_id,
+            call_create_type: "suicide".to_string(),
+            ..Default::default()
+        };
+        selfdestruct_trace.id = selfdestruct_trace.debank_id();
+        debank_node.children.push(DebankTraceOrLog::Trace(DebankTraceNode {
+            trace: selfdestruct_trace,
+            children: vec![],
+            success: parent_success && debank_node.success,
+        }));
     }
     debank_node
 }
@@ -570,12 +618,22 @@ fn finish_build_traces(
 pub fn build_debank_traces(
     tx_id: H256,
     traces: CallTraceArena,
+    log_index: &std::cell::RefCell<usize>,
 ) -> (Vec<DebankTrace>, Vec<DebankTrace>, Vec<DebankEvent>, Vec<DebankEvent>) {
     let nodes = traces.into_nodes();
     if nodes.is_empty() {
         return (vec![], vec![], vec![], vec![]);
     }
-    let mut top = build_trace_node(tx_id, "".to_string(), 0, &nodes[0], &nodes, true, vec![]);
+    let mut top = build_trace_node(
+        tx_id,
+        "".to_string(),
+        0,
+        &nodes[0],
+        &nodes,
+        true,
+        vec![],
+        &mut log_index.borrow_mut(),
+    );
     let mut traces = vec![];
     let mut error_traces = vec![];
     let mut events = vec![];
