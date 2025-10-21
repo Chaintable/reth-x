@@ -54,6 +54,9 @@ pub trait ReceiptConverter<N: NodePrimitives>: Debug + 'static {
         &self,
         receipts: Vec<ConvertReceiptInput<'_, N>>,
     ) -> Result<Vec<Self::RpcReceipt>, Self::Error>;
+
+    /// Gets the deposit nonce from a receipt if available.
+    fn get_deposit_nonce(&self, receipt_response: &Self::RpcReceipt) -> Option<u64>;
 }
 
 /// A type that knows how to convert a consensus header into an RPC header.
@@ -153,6 +156,9 @@ pub trait RpcConvert: Send + Sync + Unpin + Clone + Debug + 'static {
         &self,
         receipts: Vec<ConvertReceiptInput<'_, Self::Primitives>>,
     ) -> Result<Vec<RpcReceipt<Self::Network>>, Self::Error>;
+
+    /// Gets the deposit nonce from a receipt if available.
+    fn get_deposit_nonce(&self, receipt: &RpcReceipt<Self::Network>) -> Option<u64>;
 
     /// Converts a primitive header to an RPC header.
     fn convert_header(
@@ -482,7 +488,7 @@ impl TryIntoTxEnv<TxEnv> for TransactionRequest {
     ) -> Result<TxEnv, Self::Err> {
         // Ensure that if versioned hashes are set, they're not empty
         if self.blob_versioned_hashes.as_ref().is_some_and(|hashes| hashes.is_empty()) {
-            return Err(CallFeesError::BlobTransactionMissingBlobHashes.into())
+            return Err(CallFeesError::BlobTransactionMissingBlobHashes.into());
         }
 
         let tx_type = self.minimal_tx_type() as u8;
@@ -904,6 +910,10 @@ where
         receipts: Vec<ConvertReceiptInput<'_, Self::Primitives>>,
     ) -> Result<Vec<RpcReceipt<Self::Network>>, Self::Error> {
         self.receipt_converter.convert_receipts(receipts)
+    }
+
+    fn get_deposit_nonce(&self, receipt: &RpcReceipt<Self::Network>) -> Option<u64> {
+        self.receipt_converter.get_deposit_nonce(receipt)
     }
 
     fn convert_header(

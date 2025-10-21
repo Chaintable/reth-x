@@ -22,6 +22,7 @@ use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_api::TraceApiServer;
+use reth_rpc_convert::RpcConvert;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{
@@ -684,7 +685,8 @@ where
         for index in 0..block.body().transactions().len() {
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
-            let debank_tx: DebankTransaction = (receipt, tx).into();
+            let deposit_nonce = self.eth_api().tx_resp_builder().get_deposit_nonce(receipt);
+            let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce).into();
             debank_txs.push(debank_tx);
         }
 

@@ -108,6 +108,7 @@ pub trait TraceApi<TxReq> {
     #[method(name = "blockOpcodeGas")]
     async fn trace_block_opcode_gas(&self, block_id: BlockId) -> RpcResult<Option<BlockOpcodeGas>>;
 
+    /// Returns debank's trace information for a given block.
     #[method(name = "debankBlock")]
     async fn trace_debank_block(&self, block_id: BlockId) -> RpcResult<DebankOutPut>;
 }

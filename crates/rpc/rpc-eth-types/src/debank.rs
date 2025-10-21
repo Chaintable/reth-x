@@ -1,6 +1,7 @@
 use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_consensus::BlockHeader;
 use alloy_genesis::Genesis;
+use alloy_network::Network;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{
     hex, keccak256, Address, BlockHash, BlockNumber, Bytes, B256 as H256, U256,
@@ -9,6 +10,7 @@ use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
 use reth_revm::db::{AccountState, Cache};
+use reth_trie::EMPTY_ROOT_HASH;
 use revm::interpreter::InstructionResult;
 use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
@@ -17,7 +19,6 @@ use revm_inspectors::tracing::CallTraceArena;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
-use reth_trie::EMPTY_ROOT_HASH;
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -267,12 +268,12 @@ pub struct DebankTransaction {
     pub value: U256,
 }
 
-impl<R, T> From<(&R, &T)> for DebankTransaction
+impl<R, T> From<(&R, &T, Option<u64>)> for DebankTransaction
 where
     R: ReceiptResponse,
     T: Transaction,
 {
-    fn from((receipt, tx): (&R, &T)) -> Self {
+    fn from((receipt, tx, deposit_nonce): (&R, &T, Option<u64>)) -> Self {
         Self {
             id: receipt.transaction_hash(),
             from: receipt.from(),
@@ -284,7 +285,7 @@ where
             gas_fee_cap: tx.max_fee_per_gas(),
             gas_tip_cap: tx.max_priority_fee_per_gas().unwrap_or_default(),
             input: tx.input().clone(),
-            nonce: tx.nonce(),
+            nonce: if tx.nonce() == 0 { deposit_nonce.unwrap_or(0) } else { tx.nonce() },
             transaction_index: receipt.transaction_index().unwrap_or(0),
             value: tx.value(),
         }
