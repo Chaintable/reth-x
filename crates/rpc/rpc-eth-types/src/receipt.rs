@@ -106,4 +106,8 @@ where
 
         Ok(receipts)
     }
+
+    fn get_deposit_nonce(&self, _receipt_response: &Self::RpcReceipt) -> Option<u64> {
+        None
+    }
 }

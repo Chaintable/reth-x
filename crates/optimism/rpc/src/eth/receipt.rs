@@ -91,6 +91,15 @@ where
 
         Ok(receipts)
     }
+
+    fn get_deposit_nonce(&self, receipt_response: &Self::RpcReceipt) -> Option<u64> {
+        match &receipt_response.inner.inner {
+            OpReceiptEnvelope::Deposit(deposit_receipt_with_bloom) => {
+                deposit_receipt_with_bloom.receipt.deposit_nonce.clone()
+            }
+            _ => None,
+        }
+    }
 }
 
 /// L1 fee and data gas for a non-deposit transaction, or deposit nonce and receipt version for a
