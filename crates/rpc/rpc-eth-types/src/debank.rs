@@ -8,7 +8,8 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache, CacheDB};
+use reth_revm::db::{AccountState, Cache};
+use reth_trie::EMPTY_ROOT_HASH;
 use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
@@ -16,7 +17,6 @@ use revm_inspectors::tracing::CallTraceArena;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
-use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -98,13 +98,13 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
                     continue; // Code already exists in the previous state
                 }
             }
-            new_codes.push(NewCode { code_hash, code: code.bytes() });
+            new_codes.push(NewCode { code_hash, code: code.original_bytes() });
         }
     }
 
     BlockStorageDiff {
-        hash: H256::ZERO,        // These will need to be set by the caller
-        parent_hash: H256::ZERO, // These will need to be set by the caller
+        hash: H256::ZERO,             // These will need to be set by the caller
+        parent_hash: EMPTY_ROOT_HASH, // These will need to be set by the caller
         new_accounts,
         deleted_accounts,
         storage_diffs,
