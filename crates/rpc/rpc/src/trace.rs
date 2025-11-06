@@ -658,8 +658,7 @@ where
         };
         if block.number() == 0 {
             let mut state_diff: BlockStorageDiff = self.provider().chain_spec().genesis().into();
-            let genesis_hash = self.provider().chain_spec().genesis_hash();
-            state_diff.hash = genesis_hash;
+            state_diff.hash = block.state_root();
             let block_file = BlockFile {
                 block: debank_block,
                 storage_contracts: get_storage_contracts_from_genesis(
