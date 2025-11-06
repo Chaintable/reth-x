@@ -150,7 +150,7 @@ impl From<&Genesis> for BlockStorageDiff {
 
         BlockStorageDiff {
             hash: H256::ZERO, // These will need to be set by the caller
-            parent_hash: KECCAK_EMPTY,
+            parent_hash: EMPTY_ROOT_HASH,
             new_accounts,
             deleted_accounts: vec![],
             storage_diffs,
