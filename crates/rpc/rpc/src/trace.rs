@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardfork, MAINNET, SEPOLIA};
 use reth_evm::ConfigureEvm;
-use reth_primitives_traits::{BlockBody, BlockHeader};
+use reth_primitives_traits::{receipt, BlockBody, BlockHeader};
 use reth_revm::{database::StateProviderDatabase, db::CacheDB};
 use reth_rpc_api::TraceApiServer;
 use reth_rpc_convert::RpcTxReq;
@@ -31,8 +31,8 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{
     build_debank_traces, error::EthApiError, get_storage_contracts_from_genesis,
-    utils::recover_raw_transaction, BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut,
-    DebankTransaction, EthConfig,
+    utils::recover_raw_transaction, BlockFile, BlockStorageDiff, DebankBlock, DebankEvent,
+    DebankOutPut, DebankTransaction, EthConfig,
 };
 use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
@@ -704,6 +704,7 @@ where
                 validation_hash,
             });
         }
+        let log_index = std::cell::RefCell::new(0);
         let (mut traces, mut state_diff, change_addresses) = self
             .eth_api()
             .trace_all_block(
@@ -717,6 +718,7 @@ where
                     Ok(build_debank_traces(
                         tx_info.hash.unwrap(),
                         ctx.take_inspector().into_traces(),
+                        &log_index,
                     ))
                 },
             )

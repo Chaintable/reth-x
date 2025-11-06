@@ -484,6 +484,7 @@ fn build_trace_node(
     nodes: &Vec<CallTraceNode>,
     parent_success: bool,
     trace_address: Vec<usize>,
+    log_index: &mut usize,
 ) -> DebankTraceNode {
     let mut debank_node = DebankTraceNode {
         trace: node.into(),
@@ -516,6 +517,7 @@ fn build_trace_node(
                     nodes,
                     debank_node.success,
                     trace_address,
+                    log_index,
                 );
                 if child_trace.trace.storage_change {
                     debank_node.trace.storage_change = true;
@@ -529,6 +531,10 @@ fn build_trace_node(
                 child_event.tx_id = tx_id;
                 child_event.parent_trace_id = id.clone();
                 child_event.id = child_event.debank_id();
+                child_event.idx = *log_index;
+                if debank_node.success {
+                    *log_index += 1;
+                }
                 debank_node.children.push(DebankTraceOrLog::Log(child_event));
             }
             _ => {}
@@ -570,12 +576,22 @@ fn finish_build_traces(
 pub fn build_debank_traces(
     tx_id: H256,
     traces: CallTraceArena,
+    log_index: &std::cell::RefCell<usize>,
 ) -> (Vec<DebankTrace>, Vec<DebankTrace>, Vec<DebankEvent>, Vec<DebankEvent>) {
     let nodes = traces.into_nodes();
     if nodes.is_empty() {
         return (vec![], vec![], vec![], vec![]);
     }
-    let mut top = build_trace_node(tx_id, "".to_string(), 0, &nodes[0], &nodes, true, vec![]);
+    let mut top = build_trace_node(
+        tx_id,
+        "".to_string(),
+        0,
+        &nodes[0],
+        &nodes,
+        true,
+        vec![],
+        &mut log_index.borrow_mut(),
+    );
     let mut traces = vec![];
     let mut error_traces = vec![];
     let mut events = vec![];
