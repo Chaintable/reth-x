@@ -229,7 +229,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
             id: block.hash(),
             height: block.header().number(),
             parent_id: block.header().parent_hash(),
-            base_fee_per_gas: block.header().base_fee_per_gas(),
+            base_fee_per_gas: block.header().base_fee_per_gas().or(Some(0)),
             miner: block.header().beneficiary(),
             gas_limit: block.header().gas_limit(),
             gas_used: block.header().gas_used(),
