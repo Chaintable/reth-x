@@ -705,7 +705,7 @@ where
             });
         }
         let log_index = std::cell::RefCell::new(0);
-        let (mut traces, mut state_diff, change_addresses) = self
+        let (mut traces, mut state_diff) = self
             .eth_api()
             .trace_all_block(
                 block_id,
@@ -723,13 +723,15 @@ where
                 },
             )
             .await?;
-        for (trace, error_trace, event, error_event) in traces.drain(..) {
+        let mut change_addresses = HashSet::new();
+        for (trace, error_trace, event, error_event, change_address) in traces.drain(..) {
             block_file.traces.extend(trace);
             block_file.error_traces.extend(error_trace);
             block_file.events.extend(event);
             block_file.error_events.extend(error_event);
+            change_addresses.extend(change_address);
         }
-        block_file.storage_contracts = change_addresses;
+        block_file.storage_contracts = change_addresses.into_iter().collect();
         let validation_hash = block_file.validation().validation_hash;
         state_diff.hash = block.state_root();
         state_diff.parent_hash = parent_block.state_root();

@@ -10,6 +10,7 @@ use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
 use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
+use revm::interpreter::InstructionResult;
 use revm::DatabaseRef;
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
@@ -409,6 +410,30 @@ impl DebankID for DebankTrace {
     }
 }
 
+pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
+    if res.is_ok() {
+        return None;
+    }
+    let msg = match res {
+        InstructionResult::Revert => "Reverted".to_string(),
+        InstructionResult::OutOfGas
+        | InstructionResult::PrecompileOOG
+        | InstructionResult::MemoryOOG
+        | InstructionResult::MemoryLimitOOG
+        | InstructionResult::InvalidOperandOOG
+        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
+        InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
+            "Bad instruction".to_string()
+        }
+        InstructionResult::StackOverflow => "Out of stack".to_string(),
+        InstructionResult::InvalidJump => "Bad jump destination".to_string(),
+        InstructionResult::PrecompileError => "Built-in failed".to_string(),
+        status => format!("{status:?}"),
+    };
+    Some(msg)
+}
+
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
@@ -428,6 +453,7 @@ impl From<&CallTraceNode> for DebankTrace {
         if call_create_type == "call" {
             call_type = trace.kind.to_string().to_lowercase();
         }
+        let error = trace.status.and_then(fmt_error_msg);
         let mut debank_trace = DebankTrace {
             id: "".to_string(),
             from_addr: trace.caller,
@@ -440,6 +466,7 @@ impl From<&CallTraceNode> for DebankTrace {
             call_create_type,
             call_type,
             subtraces: call_trace.children.len(),
+            error: error.unwrap_or_default(),
             ..Default::default()
         };
         if call_trace.is_selfdestruct() {
@@ -488,7 +515,14 @@ fn build_trace_node(
     parent_success: bool,
     trace_address: Vec<usize>,
     log_index: &mut usize,
+    change_address: &mut std::collections::HashSet<Address>,
 ) -> DebankTraceNode {
+    for op in node.trace.steps.iter() {
+        if op.op == OpCode::SSTORE {
+            change_address.insert(node.execution_address());
+            break;
+        }
+    }
     let mut debank_node = DebankTraceNode {
         trace: node.into(),
         children: Vec::new(),
@@ -521,6 +555,7 @@ fn build_trace_node(
                     debank_node.success,
                     trace_address,
                     log_index,
+                    change_address,
                 );
                 if child_trace.trace.storage_change {
                     debank_node.trace.storage_change = true;
@@ -553,7 +588,7 @@ fn finish_build_traces(
     events: &mut Vec<DebankEvent>,
     error_events: &mut Vec<DebankEvent>,
 ) {
-    if node.success {
+    if node.trace.error.is_empty() {
         traces.push(node.trace.clone());
     } else {
         error_traces.push(node.trace.clone());
@@ -580,11 +615,18 @@ pub fn build_debank_traces(
     tx_id: H256,
     traces: CallTraceArena,
     log_index: &std::cell::RefCell<usize>,
-) -> (Vec<DebankTrace>, Vec<DebankTrace>, Vec<DebankEvent>, Vec<DebankEvent>) {
+) -> (
+    Vec<DebankTrace>,
+    Vec<DebankTrace>,
+    Vec<DebankEvent>,
+    Vec<DebankEvent>,
+    std::collections::HashSet<Address>,
+) {
     let nodes = traces.into_nodes();
     if nodes.is_empty() {
-        return (vec![], vec![], vec![], vec![]);
+        return Default::default();
     }
+    let mut change_address = std::collections::HashSet::new();
     let mut top = build_trace_node(
         tx_id,
         "".to_string(),
@@ -594,11 +636,12 @@ pub fn build_debank_traces(
         true,
         vec![],
         &mut log_index.borrow_mut(),
+        &mut change_address,
     );
     let mut traces = vec![];
     let mut error_traces = vec![];
     let mut events = vec![];
     let mut error_events = vec![];
     finish_build_traces(&mut top, &mut traces, &mut error_traces, &mut events, &mut error_events);
-    (traces, error_traces, events, error_events)
+    (traces, error_traces, events, error_events, change_address)
 }
