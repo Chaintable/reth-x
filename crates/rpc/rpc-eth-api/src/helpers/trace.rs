@@ -443,9 +443,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
 
         // apply relevant system calls
         let mut evm = self.evm_config().evm_with_env(db, evm_env.clone());
-        system_caller.apply_pre_execution_changes(block.header(), &mut evm).map_err(|err| {
-            EthApiError::EvmCustom(format!("failed to apply 4788 system call {err}"))
-        })?;
+        system_caller
+            .apply_blockhashes_contract_call(block.header().parent_hash(), &mut evm)
+            .map_err(|err| {
+                EthApiError::EvmCustom(format!("failed to apply 2935 system call {err}"))
+            })?;
 
         Ok(())
     }
@@ -455,7 +457,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
         block_id: BlockId,
         mut inspector_setup: Setup,
         f: F,
-    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff, Vec<Address>), Self::Error>> + Send
+    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff), Self::Error>> + Send
     where
         Self: LoadBlock,
         F: Fn(
@@ -523,8 +525,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> {
                     })
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
-                let change_addresses = get_storage_contracts_from_cache(&db.diff.cache);
-                Ok((results, get_storage_diffs_from_cache(db.diff.cache, pre_db), change_addresses))
+                Ok((results, get_storage_diffs_from_cache(db.diff.cache, pre_db)))
             })
             .await
         }
