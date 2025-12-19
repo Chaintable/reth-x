@@ -12,7 +12,7 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -28,7 +28,7 @@ use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
     precompiles::PrecompilesMap,
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use core::{error::Error, fmt::Debug};
 use execute::{BasicBlockExecutor, BlockAssembler, BlockBuilder};
 use reth_execution_errors::BlockExecutionError;
@@ -44,8 +44,10 @@ pub mod execute;
 mod aliases;
 pub use aliases::*;
 
+#[cfg(feature = "std")]
 mod engine;
-pub use engine::{ConfigureEngineEvm, ExecutableTxIterator};
+#[cfg(feature = "std")]
+pub use engine::{ConfigureEngineEvm, ExecutableTxIterator, ExecutableTxTuple};
 
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -404,7 +406,13 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         db: &'a mut State<DB>,
         parent: &'a SealedHeader<<Self::Primitives as NodePrimitives>::BlockHeader>,
         attributes: Self::NextBlockEnvCtx,
-    ) -> Result<impl BlockBuilder<Primitives = Self::Primitives>, Self::Error> {
+    ) -> Result<
+        impl BlockBuilder<
+            Primitives = Self::Primitives,
+            Executor: BlockExecutorFor<'a, Self::BlockExecutorFactory, DB>,
+        >,
+        Self::Error,
+    > {
         let evm_env = self.next_evm_env(parent, &attributes)?;
         let evm = self.evm_with_env(db, evm_env);
         let ctx = self.context_for_next_block(parent, attributes)?;
@@ -495,6 +503,8 @@ pub struct NextBlockEnvAttributes {
     pub parent_beacon_block_root: Option<B256>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+    /// Optional extra data.
+    pub extra_data: Bytes,
 }
 
 /// Abstraction over transaction environment.
