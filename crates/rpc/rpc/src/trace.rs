@@ -21,7 +21,6 @@ use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardfork, MAINNET,
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_rpc_api::TraceApiServer;
-use reth_rpc_convert::RpcConvert;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{
@@ -37,13 +36,12 @@ use reth_rpc_eth_types::{
 use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_transaction_pool::{PoolPooledTx, PoolTransaction, TransactionPool};
-use revm::bytecode::OpCode;
 use revm::DatabaseCommit;
 use revm_inspectors::{
     opcode::OpcodeGasInspector,
     storage::StorageInspector,
     tracing::{
-        parity::populate_state_diff, OpcodeFilter, TracingInspector, TracingInspectorConfig,
+        parity::populate_state_diff, TracingInspector, TracingInspectorConfig,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -627,10 +625,9 @@ where
 
 impl<Eth> TraceApi<Eth>
 where
-    // tracing methods read from mempool, hence `LoadBlock` trait bound via
-    // `TraceExt`
     Eth: TraceExt + 'static + EthBlocks + LoadReceipt,
 {
+    /// Returns debank's trace information for a given block.
     pub async fn trace_debank_block(&self, block_id: BlockId) -> Result<DebankOutPut, Eth::Error> {
         let block = self.eth_api().recovered_block(block_id).await?;
         let Some(block) = block else { return Err(EthApiError::HeaderNotFound(block_id).into()) };
@@ -691,7 +688,8 @@ where
         for index in 0..block.body().transactions().len() {
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
-            let deposit_nonce = self.eth_api().tx_resp_builder().get_deposit_nonce(receipt);
+            // deposit_nonce is only available for Optimism, return None for Ethereum
+            let deposit_nonce: Option<u64> = None;
             let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce).into();
             debank_txs.push(debank_tx);
         }
@@ -717,19 +715,15 @@ where
             });
         }
         let log_index = std::cell::RefCell::new(0);
-        let (mut traces, mut state_diff, change_addresses) = self
+        let traces = self
             .eth_api()
-            .trace_all_block(
+            .trace_block_with(
                 block_id,
-                || {
-                    let mut trace_cfg = TracingInspectorConfig::default_parity()
-                        .set_steps(true)
-                        .set_record_logs(true)
-                        .set_exclude_precompile_calls(false);
-                    trace_cfg.record_opcodes_filter =
-                        Some(OpcodeFilter::new().enabled(OpCode::SSTORE));
-                    TracingInspector::new(trace_cfg)
-                },
+                None,
+                TracingInspectorConfig::default_parity()
+                    .set_steps(true)
+                    .set_record_logs(true)
+                    .set_exclude_precompile_calls(false),
                 move |tx_info, mut ctx| {
                     Ok(build_debank_traces(
                         tx_info.hash.unwrap(),
@@ -739,16 +733,20 @@ where
                 },
             )
             .await?;
-        for (trace, error_trace, event, error_event) in traces.drain(..) {
-            block_file.traces.extend(trace);
-            block_file.error_traces.extend(error_trace);
-            block_file.events.extend(event);
-            block_file.error_events.extend(error_event);
+        if let Some(mut traces) = traces {
+            for (trace, error_trace, event, error_event) in traces.drain(..) {
+                block_file.traces.extend(trace);
+                block_file.error_traces.extend(error_trace);
+                block_file.events.extend(event);
+                block_file.error_events.extend(error_event);
+            }
         }
-        block_file.storage_contracts = change_addresses;
         let validation_hash = block_file.validation().validation_hash;
-        state_diff.hash = block.state_root();
-        state_diff.parent_hash = parent_block.state_root();
+        let state_diff = BlockStorageDiff {
+            hash: block.state_root(),
+            parent_hash: parent_block.state_root(),
+            ..Default::default()
+        };
         Ok(DebankOutPut {
             block_file,
             header: debank_header,

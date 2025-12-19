@@ -47,6 +47,9 @@ pub trait ReceiptConverter<N: NodePrimitives>: Debug + 'static {
         receipts: Vec<ConvertReceiptInput<'_, N>>,
     ) -> Result<Vec<Self::RpcReceipt>, Self::Error>;
 
+    /// Gets the deposit nonce from a receipt if available.
+    fn get_deposit_nonce(&self, receipt_response: &Self::RpcReceipt) -> Option<u64>;
+
     /// Converts a set of primitive receipts to RPC representations. It is guaranteed that all
     /// receipts are from `block`.
     fn convert_receipts_with_block(
