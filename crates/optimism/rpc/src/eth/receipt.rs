@@ -103,10 +103,8 @@ where
     }
 
     fn get_deposit_nonce(&self, receipt_response: &Self::RpcReceipt) -> Option<u64> {
-        match &receipt_response.inner.inner {
-            OpReceiptEnvelope::Deposit(deposit_receipt_with_bloom) => {
-                deposit_receipt_with_bloom.receipt.deposit_nonce.clone()
-            }
+        match &receipt_response.inner.inner.receipt {
+            OpReceipt::Deposit(deposit_receipt) => deposit_receipt.deposit_nonce,
             _ => None,
         }
     }

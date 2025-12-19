@@ -179,6 +179,12 @@ pub trait RpcConvert: Send + Sync + Unpin + Debug + DynClone + 'static {
         block: &SealedBlock<BlockTy<Self::Primitives>>,
     ) -> Result<Vec<RpcReceipt<Self::Network>>, Self::Error>;
 
+    /// Gets the deposit nonce from an RPC receipt if available.
+    /// Returns `None` for non-deposit transactions or chains that don't support deposits.
+    fn get_deposit_nonce(&self, _receipt: &RpcReceipt<Self::Network>) -> Option<u64> {
+        None
+    }
+
     /// Converts a primitive header to an RPC header.
     fn convert_header(
         &self,
@@ -858,6 +864,10 @@ where
         block: &SealedBlock<BlockTy<Self::Primitives>>,
     ) -> Result<Vec<RpcReceipt<Self::Network>>, Self::Error> {
         self.receipt_converter.convert_receipts_with_block(receipts, block)
+    }
+
+    fn get_deposit_nonce(&self, receipt: &RpcReceipt<Self::Network>) -> Option<u64> {
+        self.receipt_converter.get_deposit_nonce(receipt)
     }
 
     fn convert_header(

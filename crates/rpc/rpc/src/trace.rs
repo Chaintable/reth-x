@@ -21,7 +21,7 @@ use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardfork, MAINNET,
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_rpc_api::TraceApiServer;
-use reth_rpc_convert::RpcTxReq;
+use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_api::{
     helpers::{
         block::EthBlocks, Call, LoadPendingBlock, LoadReceipt, LoadTransaction, Trace, TraceExt,
@@ -37,11 +37,12 @@ use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_transaction_pool::{PoolPooledTx, PoolTransaction, TransactionPool};
 use revm::DatabaseCommit;
+use revm_bytecode::opcode::OpCode;
 use revm_inspectors::{
     opcode::OpcodeGasInspector,
     storage::StorageInspector,
     tracing::{
-        parity::populate_state_diff, TracingInspector, TracingInspectorConfig,
+        parity::populate_state_diff, OpcodeFilter, TracingInspector, TracingInspectorConfig,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -447,13 +448,13 @@ where
                 } else {
                     // no block reward, means we're past the Paris hardfork and don't expect any
                     // rewards because the blocks in ascending order
-                    break
+                    break;
                 }
             }
 
             // Skips the first `after` number of matching traces.
-            if let Some(cutoff) = after.map(|a| a as usize) &&
-                cutoff < all_traces.len()
+            if let Some(cutoff) = after.map(|a| a as usize)
+                && cutoff < all_traces.len()
             {
                 all_traces.drain(..cutoff);
                 // we removed the first `after` traces
@@ -465,17 +466,17 @@ where
                 let count = count as usize;
                 if count < all_traces.len() {
                     all_traces.truncate(count);
-                    return Ok(all_traces)
+                    return Ok(all_traces);
                 }
             };
         }
 
         // If `after` is greater than or equal to the number of matched traces, it returns an
         // empty array.
-        if let Some(cutoff) = after.map(|a| a as usize) &&
-            cutoff >= all_traces.len()
+        if let Some(cutoff) = after.map(|a| a as usize)
+            && cutoff >= all_traces.len()
         {
-            return Ok(vec![])
+            return Ok(vec![]);
         }
 
         Ok(all_traces)
@@ -505,8 +506,8 @@ where
         let mut maybe_traces =
             maybe_traces.map(|traces| traces.into_iter().flatten().collect::<Vec<_>>());
 
-        if let (Some(block), Some(traces)) = (maybe_block, maybe_traces.as_mut()) &&
-            let Some(base_block_reward) = self.calculate_base_block_reward(block.header())?
+        if let (Some(block), Some(traces)) = (maybe_block, maybe_traces.as_mut())
+            && let Some(base_block_reward) = self.calculate_base_block_reward(block.header())?
         {
             traces.extend(self.extract_reward_traces(
                 block.header(),
@@ -688,8 +689,8 @@ where
         for index in 0..block.body().transactions().len() {
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
-            // deposit_nonce is only available for Optimism, return None for Ethereum
-            let deposit_nonce: Option<u64> = None;
+            let deposit_nonce: Option<u64> =
+                self.eth_api().converter().get_deposit_nonce(receipt);
             let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce).into();
             debank_txs.push(debank_tx);
         }
@@ -715,15 +716,19 @@ where
             });
         }
         let log_index = std::cell::RefCell::new(0);
-        let traces = self
+        let (mut traces, mut state_diff, change_addresses) = self
             .eth_api()
-            .trace_block_with(
+            .trace_all_block(
                 block_id,
-                None,
-                TracingInspectorConfig::default_parity()
-                    .set_steps(true)
-                    .set_record_logs(true)
-                    .set_exclude_precompile_calls(false),
+                || {
+                    let mut trace_cfg = TracingInspectorConfig::default_parity()
+                        .set_steps(true)
+                        .set_record_logs(true)
+                        .set_exclude_precompile_calls(false);
+                    trace_cfg.record_opcodes_filter =
+                        Some(OpcodeFilter::new().enabled(OpCode::SSTORE));
+                    TracingInspector::new(trace_cfg)
+                },
                 move |tx_info, mut ctx| {
                     Ok(build_debank_traces(
                         tx_info.hash.unwrap(),
@@ -733,20 +738,16 @@ where
                 },
             )
             .await?;
-        if let Some(mut traces) = traces {
-            for (trace, error_trace, event, error_event) in traces.drain(..) {
-                block_file.traces.extend(trace);
-                block_file.error_traces.extend(error_trace);
-                block_file.events.extend(event);
-                block_file.error_events.extend(error_event);
-            }
+        for (trace, error_trace, event, error_event) in traces.drain(..) {
+            block_file.traces.extend(trace);
+            block_file.error_traces.extend(error_trace);
+            block_file.events.extend(event);
+            block_file.error_events.extend(error_event);
         }
+        state_diff.hash = block.state_root();
+        state_diff.parent_hash = parent_block.state_root();
+        block_file.storage_contracts = change_addresses;
         let validation_hash = block_file.validation().validation_hash;
-        let state_diff = BlockStorageDiff {
-            hash: block.state_root(),
-            parent_hash: parent_block.state_root(),
-            ..Default::default()
-        };
         Ok(DebankOutPut {
             block_file,
             header: debank_header,
