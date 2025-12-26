@@ -65,7 +65,12 @@ alloy-rpc-types-txpool.workspace = true
 alloy-rpc-types-admin.workspace = true
 alloy-rpc-types-engine = { workspace = true, features = ["kzg"] }
 alloy-serde.workspace = true
-revm = { workspace = true, features = ["optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee", "memory_limit"] }
+revm = { workspace = true, features = [
+    "optional_block_gas_limit",
+    "optional_eip3607",
+    "optional_no_base_fee",
+    "memory_limit",
+] }
 revm-bytecode.workspace = true
 revm-primitives = { workspace = true, features = ["serde"] }
 
@@ -96,6 +101,8 @@ sha2.workspace = true
 thiserror.workspace = true
 derive_more.workspace = true
 itertools.workspace = true
+
+revm-delta-inspector.workspace = true
 
 [dev-dependencies]
 reth-ethereum-primitives.workspace = true

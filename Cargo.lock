@@ -5971,6 +5971,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "multimap"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6603,6 +6609,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "petgraph"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
+dependencies = [
+ "fixedbitset",
+ "indexmap 2.12.1",
+]
+
+[[package]]
 name = "pharos"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6970,6 +6986,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost-build"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
+dependencies = [
+ "heck",
+ "itertools 0.10.5",
+ "log",
+ "multimap",
+ "once_cell",
+ "petgraph",
+ "prettyplease",
+ "prost",
+ "prost-types",
+ "regex",
+ "syn 2.0.111",
+ "tempfile",
+]
+
+[[package]]
 name = "prost-derive"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6980,6 +7016,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "prost-types"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9b4db3d6da204ed77bb26ba83b6122a73aeb2e87e25fbf7ad2e84c4ccbf8f72"
+dependencies = [
+ "prost",
 ]
 
 [[package]]
@@ -7381,6 +7426,16 @@ name = "relative-path"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
+name = "replayable-delta-trace-proto"
+version = "0.1.2"
+source = "git+https://github.com/Chaintable/evm-delta-replayable-tracer.git?tag=v0.1.3-rc0#c910d6dbf085db26dfad282f922ab350592dc3bd"
+dependencies = [
+ "prost",
+ "prost-build",
+ "zstd",
+]
 
 [[package]]
 name = "reqwest"
@@ -10225,6 +10280,7 @@ dependencies = [
  "reth-trie-common",
  "revm",
  "revm-bytecode",
+ "revm-delta-inspector",
  "revm-inspectors",
  "revm-primitives",
  "serde",
@@ -11191,6 +11247,22 @@ dependencies = [
  "revm-primitives",
  "revm-state",
  "serde",
+]
+
+[[package]]
+name = "revm-delta-inspector"
+version = "0.1.2"
+source = "git+https://github.com/Chaintable/evm-delta-replayable-tracer.git?tag=v0.1.3-rc0#c910d6dbf085db26dfad282f922ab350592dc3bd"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
+ "alloy-sol-types",
+ "colorchoice",
+ "replayable-delta-trace-proto",
+ "revm",
+ "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

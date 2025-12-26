@@ -94,6 +94,8 @@ pub trait DebugApi<TxReq: RpcObject> {
         opts: Option<GethDebugTracingOptions>,
     ) -> RpcResult<GethTrace>;
 
+    #[method(name = "traceBlockByNumber2")]
+    async fn debug_trace_block_by_number2(&self, block: BlockNumberOrTag) -> RpcResult<Bytes>;
     /// The `debug_traceCall` method lets you run an `eth_call` within the context of the given
     /// block execution using the final state of parent block as the base.
     ///

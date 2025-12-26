@@ -40,6 +40,10 @@ use reth_storage_api::{
 use reth_tasks::{pool::BlockingTaskGuard, TaskSpawner};
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::DatabaseCommit;
+use revm_delta_inspector::{
+    BlockTxsReplayableDeltaOpInspector, ProtoBuilder, SingleTxReplayableDeltaOpInspector,
+    TracingOptions,
+};
 use revm_inspectors::tracing::{DebugInspector, TransactionContext};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
@@ -74,8 +78,8 @@ where
         // Spawn a task caching bad blocks
         executor.spawn(Box::pin(async move {
             while let Some(event) = stream.next().await {
-                if let ConsensusEngineEvent::InvalidBlock(block) = event &&
-                    let Ok(recovered) =
+                if let ConsensusEngineEvent::InvalidBlock(block) = event
+                    && let Ok(recovered) =
                         RecoveredBlock::try_recover_sealed(block.as_ref().clone())
                 {
                     bad_block_store.insert(recovered);
@@ -161,6 +165,41 @@ where
             .await
     }
 
+    /// Trace the entire block asynchronously
+    async fn trace_block2(
+        &self,
+        block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
+        evm_env: EvmEnvFor<Eth::Evm>,
+    ) -> Result<Bytes, Eth::Error> {
+        self.eth_api()
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                eth_api.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+
+                let mut transactions = block.transactions_recovered().enumerate().peekable();
+                let mut inspector = BlockTxsReplayableDeltaOpInspector::with_options(
+                    TracingOptions::default().without_storage(),
+                );
+                while let Some((index, tx)) = transactions.next() {
+                    let tx_hash = *tx.tx_hash();
+                    let tx_env = eth_api.evm_config().tx_env(tx);
+
+                    let res = eth_api.inspect(
+                        &mut db,
+                        evm_env.clone(),
+                        tx_env.clone(),
+                        &mut inspector,
+                    )?;
+                    inspector.finish_tx();
+                    if transactions.peek().is_some() {
+                        db.commit(res.state)
+                    }
+                }
+
+                Ok(inspector.into_compressed_proto().unwrap_or_default().into())
+            })
+            .await
+    }
+
     /// Replays the given block and returns the trace of each transaction.
     ///
     /// This expects a rlp encoded block
@@ -223,6 +262,23 @@ where
         let block = block.ok_or(EthApiError::HeaderNotFound(block_id))?;
 
         self.trace_block(block, evm_env, opts).await
+    }
+
+    pub async fn debug_trace_block2(&self, block_id: BlockId) -> Result<Bytes, Eth::Error> {
+        let block_hash = self
+            .provider()
+            .block_hash_for_id(block_id)
+            .map_err(Eth::Error::from_eth_err)?
+            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+
+        let ((evm_env, _), block) = futures::try_join!(
+            self.eth_api().evm_env_at(block_hash.into()),
+            self.eth_api().recovered_block(block_hash.into()),
+        )?;
+
+        let block = block.ok_or(EthApiError::HeaderNotFound(block_id))?;
+
+        self.trace_block2(block, evm_env).await
     }
 
     /// Trace the transaction according to the provided options.
@@ -360,7 +416,7 @@ where
                 tx_index,
                 block.transaction_count()
             ))
-            .into())
+            .into());
         }
 
         let (evm_env, _) = self.eth_api().evm_env_at(block.hash().into()).await?;
@@ -407,7 +463,7 @@ where
         opts: Option<GethDebugTracingCallOptions>,
     ) -> Result<Vec<Vec<GethTrace>>, Eth::Error> {
         if bundles.is_empty() {
-            return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into())
+            return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
         }
 
         let StateContext { transaction_index, block_number } = state_context.unwrap_or_default();
@@ -796,6 +852,11 @@ where
         Self::debug_trace_transaction(self, tx_hash, opts.unwrap_or_default())
             .await
             .map_err(Into::into)
+    }
+
+    async fn debug_trace_block_by_number2(&self, block: BlockNumberOrTag) -> RpcResult<Bytes> {
+        let _permit = self.acquire_trace_permit().await;
+        Self::debug_trace_block2(self, block.into()).await.map_err(Into::into)
     }
 
     /// Handler for `debug_traceCall`
