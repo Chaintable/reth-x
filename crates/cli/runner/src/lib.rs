@@ -6,20 +6,12 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Entrypoint for running commands.
 
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::{
-    future::Future,
-    pin::pin,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
-    time::Duration,
-};
+use std::{future::Future, pin::pin, sync::mpsc, time::Duration};
 use tracing::{debug, error, trace};
 
 /// Executes CLI commands.
@@ -44,11 +36,15 @@ impl CliRunner {
     pub const fn from_runtime(tokio_runtime: tokio::runtime::Runtime) -> Self {
         Self { tokio_runtime }
     }
-}
 
-// === impl CliRunner ===
+    /// Executes an async block on the runtime and blocks until completion.
+    pub fn block_on<F, T>(&self, fut: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        self.tokio_runtime.block_on(fut)
+    }
 
-impl CliRunner {
     /// Executes the given _async_ command on the tokio runtime until the command future resolves or
     /// until the process receives a `SIGINT` or `SIGTERM` signal.
     ///
@@ -85,6 +81,57 @@ impl CliRunner {
         // (including blocking pool) are shutdown. Since we want to exit as soon as possible, drop
         // it on a separate thread and wait for up to 5 seconds for this operation to
         // complete.
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("tokio-runtime-shutdown".to_string())
+            .spawn(move || {
+                drop(tokio_runtime);
+                let _ = tx.send(());
+            })
+            .unwrap();
+
+        let _ = rx.recv_timeout(Duration::from_secs(5)).inspect_err(|err| {
+            debug!(target: "reth::cli", %err, "tokio runtime shutdown timed out");
+        });
+
+        command_res
+    }
+
+    /// Executes a command in a blocking context with access to `CliContext`.
+    ///
+    /// See [`Runtime::spawn_blocking`](tokio::runtime::Runtime::spawn_blocking).
+    pub fn run_blocking_command_until_exit<F, E>(
+        self,
+        command: impl FnOnce(CliContext) -> F + Send + 'static,
+    ) -> Result<(), E>
+    where
+        F: Future<Output = Result<(), E>> + Send + 'static,
+        E: Send + Sync + From<std::io::Error> + From<reth_tasks::PanickedTaskError> + 'static,
+    {
+        let AsyncCliRunner { context, mut task_manager, tokio_runtime } =
+            AsyncCliRunner::new(self.tokio_runtime);
+
+        // Spawn the command on the blocking thread pool
+        let handle = tokio_runtime.handle().clone();
+        let command_handle =
+            tokio_runtime.handle().spawn_blocking(move || handle.block_on(command(context)));
+
+        // Wait for the command to complete or ctrl-c
+        let command_res = tokio_runtime.block_on(run_to_completion_or_panic(
+            &mut task_manager,
+            run_until_ctrl_c(
+                async move { command_handle.await.expect("Failed to join blocking task") },
+            ),
+        ));
+
+        if command_res.is_err() {
+            error!(target: "reth::cli", "shutting down due to error");
+        } else {
+            debug!(target: "reth::cli", "shutting down gracefully");
+            task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
+        }
+
+        // Shutdown the runtime on a separate thread
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("tokio-runtime-shutdown".to_string())
@@ -167,14 +214,7 @@ pub struct CliContext {
 /// Creates a new default tokio multi-thread [Runtime](tokio::runtime::Runtime) with all features
 /// enabled
 pub fn tokio_runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name_fn(|| {
-            static IDX: AtomicUsize = AtomicUsize::new(0);
-            let id = IDX.fetch_add(1, Ordering::Relaxed);
-            format!("tokio-{id}")
-        })
-        .build()
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()
 }
 
 /// Runs the given future to completion or until a critical task panicked.

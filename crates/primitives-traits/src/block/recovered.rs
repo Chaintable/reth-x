@@ -218,7 +218,7 @@ impl<B: Block> RecoveredBlock<B> {
 
     /// A safer variant of [`Self::new_sealed`] that checks if the number of senders is equal to
     /// the number of transactions in the block and recovers the senders from the transactions, if
-    /// not using [`SignedTransaction::recover_signer_unchecked`](crate::transaction::signed::SignedTransaction)
+    /// not using [`SignedTransaction::recover_signer`](crate::transaction::signed::SignedTransaction)
     /// to recover the senders.
     ///
     /// Returns an error if any of the transactions fail to recover the sender.
@@ -458,9 +458,7 @@ impl<B: Block> Eq for RecoveredBlock<B> {}
 
 impl<B: Block> PartialEq for RecoveredBlock<B> {
     fn eq(&self, other: &Self) -> bool {
-        self.hash_ref().eq(other.hash_ref()) &&
-            self.block.eq(&other.block) &&
-            self.senders.eq(&other.senders)
+        self.block.eq(&other.block) && self.senders.eq(&other.senders)
     }
 }
 
@@ -670,7 +668,7 @@ mod rpc_compat {
     {
         /// Converts the block into an RPC [`Block`] with the given [`BlockTransactionsKind`].
         ///
-        /// The `tx_resp_builder` closure transforms each transaction into the desired response
+        /// The `converter` closure transforms each transaction into the desired response
         /// type.
         ///
         /// `header_builder` transforms the block header into RPC representation. It takes the
@@ -679,7 +677,7 @@ mod rpc_compat {
         pub fn into_rpc_block<T, RpcH, F, E>(
             self,
             kind: BlockTransactionsKind,
-            tx_resp_builder: F,
+            converter: F,
             header_builder: impl FnOnce(SealedHeader<B::Header>, usize) -> Result<RpcH, E>,
         ) -> Result<Block<T, RpcH>, E>
         where
@@ -690,9 +688,7 @@ mod rpc_compat {
         {
             match kind {
                 BlockTransactionsKind::Hashes => self.into_rpc_block_with_tx_hashes(header_builder),
-                BlockTransactionsKind::Full => {
-                    self.into_rpc_block_full(tx_resp_builder, header_builder)
-                }
+                BlockTransactionsKind::Full => self.into_rpc_block_full(converter, header_builder),
             }
         }
 
@@ -701,7 +697,7 @@ mod rpc_compat {
         /// For transaction hashes, only necessary parts are cloned for efficiency.
         /// For full transactions, the entire block is cloned.
         ///
-        /// The `tx_resp_builder` closure transforms each transaction into the desired response
+        /// The `converter` closure transforms each transaction into the desired response
         /// type.
         ///
         /// `header_builder` transforms the block header into RPC representation. It takes the
@@ -710,7 +706,7 @@ mod rpc_compat {
         pub fn clone_into_rpc_block<T, RpcH, F, E>(
             &self,
             kind: BlockTransactionsKind,
-            tx_resp_builder: F,
+            converter: F,
             header_builder: impl FnOnce(SealedHeader<B::Header>, usize) -> Result<RpcH, E>,
         ) -> Result<Block<T, RpcH>, E>
         where
@@ -722,7 +718,7 @@ mod rpc_compat {
             match kind {
                 BlockTransactionsKind::Hashes => self.to_rpc_block_with_tx_hashes(header_builder),
                 BlockTransactionsKind::Full => {
-                    self.clone().into_rpc_block_full(tx_resp_builder, header_builder)
+                    self.clone().into_rpc_block_full(converter, header_builder)
                 }
             }
         }
@@ -771,10 +767,10 @@ mod rpc_compat {
         /// Converts the block into an RPC [`Block`] with full transaction objects.
         ///
         /// Returns [`BlockTransactions::Full`] with complete transaction data.
-        /// The `tx_resp_builder` closure transforms each transaction with its metadata.
+        /// The `converter` closure transforms each transaction with its metadata.
         pub fn into_rpc_block_full<T, RpcHeader, F, E>(
             self,
-            tx_resp_builder: F,
+            converter: F,
             header_builder: impl FnOnce(SealedHeader<B::Header>, usize) -> Result<RpcHeader, E>,
         ) -> Result<Block<T, RpcHeader>, E>
         where
@@ -805,7 +801,7 @@ mod rpc_compat {
                         index: Some(idx as u64),
                     };
 
-                    tx_resp_builder(Recovered::new_unchecked(tx, sender), tx_info)
+                    converter(Recovered::new_unchecked(tx, sender), tx_info)
                 })
                 .collect::<Result<Vec<_>, E>>()?;
 
