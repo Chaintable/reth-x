@@ -29,9 +29,9 @@ use reth_rpc_eth_api::{
     FromEthApiError, RpcNodeCore,
 };
 use reth_rpc_eth_types::{
-    build_debank_traces, error::EthApiError, get_storage_contracts_from_genesis,
-    utils::recover_raw_transaction, BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut,
-    DebankTransaction, EthConfig,
+    build_debank_traces, build_genesis_txs_and_traces, error::EthApiError,
+    get_storage_contracts_from_genesis, utils::recover_raw_transaction, BlockFile,
+    BlockStorageDiff, DebankBlock, DebankOutPut, DebankTransaction, EthConfig,
 };
 use reth_storage_api::{BlockNumReader, BlockReader};
 use reth_tasks::pool::BlockingTaskGuard;
@@ -662,13 +662,16 @@ where
             size: None,
         };
         if block.number() == 0 {
-            let mut state_diff: BlockStorageDiff = self.provider().chain_spec().genesis().into();
+            let chain_spec = self.provider().chain_spec();
+            let genesis = chain_spec.genesis();
+            let mut state_diff: BlockStorageDiff = genesis.into();
             state_diff.hash = block.state_root();
+            let (transactions, traces) = build_genesis_txs_and_traces(genesis);
             let block_file = BlockFile {
                 block: debank_block,
-                storage_contracts: get_storage_contracts_from_genesis(
-                    self.provider().chain_spec().genesis(),
-                ),
+                transactions,
+                traces,
+                storage_contracts: get_storage_contracts_from_genesis(genesis),
                 ..Default::default()
             };
             let validation_hash = block_file.validation().validation_hash;
@@ -689,8 +692,7 @@ where
         for index in 0..block.body().transactions().len() {
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
-            let deposit_nonce: Option<u64> =
-                self.eth_api().converter().get_deposit_nonce(receipt);
+            let deposit_nonce: Option<u64> = self.eth_api().converter().get_deposit_nonce(receipt);
             let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce).into();
             debank_txs.push(debank_tx);
         }
