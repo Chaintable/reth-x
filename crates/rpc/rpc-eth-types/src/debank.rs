@@ -1,7 +1,5 @@
-use alloy_consensus::constants::KECCAK_EMPTY;
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader};
 use alloy_genesis::Genesis;
-use alloy_network::Network;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{
     hex, keccak256, Address, BlockHash, BlockNumber, Bytes, B256 as H256, U256,
@@ -11,11 +9,12 @@ use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
 use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
-use revm::interpreter::InstructionResult;
-use revm::DatabaseRef;
+use revm::{interpreter::InstructionResult, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
-use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
-use revm_inspectors::tracing::CallTraceArena;
+use revm_inspectors::tracing::{
+    types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder},
+    CallTraceArena,
+};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
@@ -642,4 +641,174 @@ pub fn build_debank_traces(
     let mut error_events = vec![];
     finish_build_traces(&mut top, &mut traces, &mut error_traces, &mut events, &mut error_events);
     (traces, error_traces, events, error_events)
+}
+
+/// Build genesis transactions and traces from genesis alloc
+/// This corresponds to the Go implementation in pipeline_tracer.go line 344-500
+pub fn build_genesis_txs_and_traces(
+    genesis: &Genesis,
+) -> (Vec<DebankTransaction>, Vec<DebankTrace>) {
+    let zero_addr = Address::ZERO;
+    let mut tx_idx: u64 = 0;
+    let mut txs = Vec::new();
+    let mut traces = Vec::new();
+
+    // Sort addresses to ensure deterministic traversal order
+    let mut sorted_addrs: Vec<&Address> = genesis.alloc.keys().collect();
+    sorted_addrs.sort_by(|a, b| a.to_string().to_lowercase().cmp(&b.to_string().to_lowercase()));
+
+    for addr in sorted_addrs {
+        let account = &genesis.alloc[addr];
+        let addr_lower = format!("{:?}", addr).to_lowercase();
+
+        // Process accounts with balance - construct transfer tx and call trace
+        if account.balance > U256::ZERO {
+            // tx id: 0xgenesis01 + 13 zeros + address(42 chars) = 66 chars
+            let tx_id_str = format!("0xgenesis01{:013}{}", 0, addr_lower);
+            let tx_id = H256::from_slice(&keccak256(tx_id_str.as_bytes())[..]);
+
+            let tx = DebankTransaction {
+                id: tx_id.into(),
+                from: zero_addr,
+                to: *addr,
+                gas_limit: 0,
+                gas_price: 0,
+                gas_used: 0,
+                status: true,
+                gas_fee_cap: 0,
+                gas_tip_cap: 0,
+                input: Bytes::default(),
+                nonce: 0,
+                transaction_index: tx_idx,
+                value: account.balance,
+            };
+            txs.push(tx);
+
+            // trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
+            let trace_id = DebankTrace::calculate_id(vec![&tx_id.to_string(), "", "0"]);
+            let trace = DebankTrace {
+                id: trace_id,
+                from_addr: zero_addr,
+                gas_limit: 0,
+                input: Bytes::default(),
+                to_addr: *addr,
+                value: account.balance,
+                gas_used: 0,
+                output: Bytes::default(),
+                call_create_type: "call".to_string(),
+                call_type: "call".to_string(),
+                tx_id,
+                parent_trace_id: "".to_string(),
+                pos_in_parent_trace: 0,
+                self_storage_change: false,
+                storage_change: false,
+                subtraces: 0,
+                trace_address: vec![],
+                error: "".to_string(),
+            };
+            traces.push(trace);
+            tx_idx += 1;
+        }
+
+        // Process accounts with code - construct create tx and create trace
+        if let Some(ref code) = account.code {
+            if !code.is_empty() {
+                // tx id: 0xgenesis02 + 13 zeros + address(42 chars) = 66 chars
+                let tx_id_str = format!("0xgenesis02{:013}{}", 0, addr_lower);
+                let tx_id = H256::from_slice(&keccak256(tx_id_str.as_bytes())[..]);
+
+                let tx = DebankTransaction {
+                    id: tx_id.into(),
+                    from: zero_addr,
+                    to: *addr,
+                    gas_limit: 0,
+                    gas_price: 0,
+                    gas_used: 0,
+                    status: true,
+                    gas_fee_cap: 0,
+                    gas_tip_cap: 0,
+                    input: code.clone(),
+                    nonce: 0,
+                    transaction_index: tx_idx,
+                    value: U256::ZERO,
+                };
+                txs.push(tx);
+
+                // trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
+                let trace_id = DebankTrace::calculate_id(vec![&tx_id.to_string(), "", "0"]);
+                let trace = DebankTrace {
+                    id: trace_id,
+                    from_addr: zero_addr,
+                    gas_limit: 0,
+                    input: code.clone(),
+                    to_addr: *addr,
+                    value: U256::ZERO,
+                    gas_used: 0,
+                    output: code.clone(), // output directly uses input (code)
+                    call_create_type: "create".to_string(),
+                    call_type: "".to_string(),
+                    tx_id,
+                    parent_trace_id: "".to_string(),
+                    pos_in_parent_trace: 0,
+                    self_storage_change: false,
+                    storage_change: false,
+                    subtraces: 0,
+                    trace_address: vec![],
+                    error: "".to_string(),
+                };
+                traces.push(trace);
+                tx_idx += 1;
+            }
+        }
+    }
+
+    // Add native token contract creation tx and trace (E address: 0xeeee...eeee)
+    let native_token_addr =
+        Address::from_str("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap();
+    let native_token_addr_lower = format!("{:?}", native_token_addr).to_lowercase();
+    let native_token_tx_id_str = format!("0xgenesis03{:013}{}", 0, native_token_addr_lower);
+    let native_token_tx_id = H256::from_slice(&keccak256(native_token_tx_id_str.as_bytes())[..]);
+
+    let native_token_tx = DebankTransaction {
+        id: native_token_tx_id.into(),
+        from: zero_addr,
+        to: native_token_addr,
+        gas_limit: 0,
+        gas_price: 0,
+        gas_used: 0,
+        status: true,
+        gas_fee_cap: 0,
+        gas_tip_cap: 0,
+        input: Bytes::default(),
+        nonce: 0,
+        transaction_index: tx_idx,
+        value: U256::ZERO,
+    };
+    txs.push(native_token_tx);
+
+    let native_token_trace_id =
+        DebankTrace::calculate_id(vec![&native_token_tx_id.to_string(), "", "0"]);
+    let native_token_trace = DebankTrace {
+        id: native_token_trace_id,
+        from_addr: zero_addr,
+        gas_limit: 0,
+        input: Bytes::default(),
+        to_addr: native_token_addr,
+        value: U256::ZERO,
+        gas_used: 0,
+        output: Bytes::default(),
+        call_create_type: "create".to_string(),
+        call_type: "".to_string(),
+        tx_id: native_token_tx_id,
+        parent_trace_id: "".to_string(),
+        pos_in_parent_trace: 0,
+        self_storage_change: false,
+        storage_change: false,
+        subtraces: 0,
+        trace_address: vec![],
+        error: "".to_string(),
+    };
+    traces.push(native_token_trace);
+
+    (txs, traces)
 }

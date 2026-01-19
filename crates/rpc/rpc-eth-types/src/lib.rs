@@ -41,7 +41,7 @@ pub use transaction::TransactionSource;
 pub use tx_forward::ForwardConfig;
 
 pub use debank::{
-    build_debank_traces, get_storage_contracts_from_cache, get_storage_contracts_from_genesis,
-    get_storage_diffs_from_cache, BlockFile, BlockStorageDiff, DebankBlock, DebankEvent,
-    DebankOutPut, DebankTrace, DebankTransaction,
+    build_debank_traces, build_genesis_txs_and_traces, get_storage_contracts_from_cache,
+    get_storage_contracts_from_genesis, get_storage_diffs_from_cache, BlockFile, BlockStorageDiff,
+    DebankBlock, DebankEvent, DebankOutPut, DebankTrace, DebankTransaction,
 };
