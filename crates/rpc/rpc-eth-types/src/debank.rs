@@ -247,7 +247,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
 #[serde(rename_all = "snake_case")]
 #[serde(default)]
 pub struct DebankTransaction {
-    pub id: BlockHash,
+    pub id: String,
     #[serde(rename = "from_addr")]
     pub from: Address,
     #[serde(rename = "to_addr")]
@@ -274,7 +274,7 @@ where
 {
     fn from((receipt, tx, deposit_nonce): (&R, &T, Option<u64>)) -> Self {
         Self {
-            id: receipt.transaction_hash(),
+            id: receipt.transaction_hash().to_string(),
             from: receipt.from(),
             to: receipt.to().unwrap_or_default(),
             gas_limit: tx.gas_limit(),
@@ -318,7 +318,7 @@ pub struct DebankTrace {
     #[serde(rename = "type")]
     pub call_create_type: String,
     pub call_type: String,
-    pub tx_id: H256,
+    pub tx_id: String,
     pub parent_trace_id: String,
     pub pos_in_parent_trace: usize,
     pub self_storage_change: bool,
@@ -399,7 +399,7 @@ impl DebankID for DebankEvent {
 impl DebankID for DebankTrace {
     fn debank_id(&self) -> String {
         Self::calculate_id(vec![
-            &self.tx_id.to_string(),
+            &self.tx_id,
             &self.parent_trace_id,
             &self.pos_in_parent_trace.to_string(),
         ])
@@ -498,7 +498,7 @@ struct DebankTraceNode {
 }
 
 fn build_trace_node(
-    tx_id: H256,
+    tx_id: String,
     parent_trace_id: String,
     pos_in_parent_trace: usize,
     node: &CallTraceNode,
@@ -515,7 +515,7 @@ fn build_trace_node(
     debank_node.trace.trace_address = trace_address.clone();
     debank_node.trace.parent_trace_id = parent_trace_id;
     debank_node.trace.pos_in_parent_trace = pos_in_parent_trace;
-    debank_node.trace.tx_id = tx_id;
+    debank_node.trace.tx_id = tx_id.clone();
     debank_node.trace.id = debank_node.trace.debank_id();
 
     let id = debank_node.trace.id.clone();
@@ -530,7 +530,7 @@ fn build_trace_node(
                 trace_address.push(*i);
                 child_trace_address = trace_address.clone();
                 let child_trace = build_trace_node(
-                    tx_id,
+                    tx_id.clone(),
                     id.clone(),
                     debank_node.children.len(),
                     child_node,
@@ -572,7 +572,7 @@ fn build_trace_node(
             trace_address: child_trace_address,
             parent_trace_id: id.clone(),
             pos_in_parent_trace: debank_node.children.len(),
-            tx_id,
+            tx_id: tx_id.clone(),
             call_create_type: "suicide".to_string(),
             ..Default::default()
         };
@@ -626,7 +626,7 @@ pub fn build_debank_traces(
         return (vec![], vec![], vec![], vec![]);
     }
     let mut top = build_trace_node(
-        tx_id,
+        tx_id.to_string(),
         "".to_string(),
         0,
         &nodes[0],
@@ -663,12 +663,11 @@ pub fn build_genesis_txs_and_traces(
 
         // Process accounts with balance - construct transfer tx and call trace
         if account.balance > U256::ZERO {
-            // tx id: 0xgenesis01 + 13 zeros + address(42 chars) = 66 chars
-            let tx_id_str = format!("0xgenesis01{:013}{}", 0, addr_lower);
-            let tx_id = H256::from_slice(&keccak256(tx_id_str.as_bytes())[..]);
+            // tx id: 0xgenesis01 + 13 zeros + address(42 chars) = 67 chars
+            let tx_id = format!("0xgenesis01{:013}{}", 0, addr_lower);
 
             let tx = DebankTransaction {
-                id: tx_id.into(),
+                id: tx_id.clone(),
                 from: zero_addr,
                 to: *addr,
                 gas_limit: 0,
@@ -685,7 +684,7 @@ pub fn build_genesis_txs_and_traces(
             txs.push(tx);
 
             // trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
-            let trace_id = DebankTrace::calculate_id(vec![&tx_id.to_string(), "", "0"]);
+            let trace_id = DebankTrace::calculate_id(vec![&tx_id, "", "0"]);
             let trace = DebankTrace {
                 id: trace_id,
                 from_addr: zero_addr,
@@ -713,12 +712,11 @@ pub fn build_genesis_txs_and_traces(
         // Process accounts with code - construct create tx and create trace
         if let Some(ref code) = account.code {
             if !code.is_empty() {
-                // tx id: 0xgenesis02 + 13 zeros + address(42 chars) = 66 chars
-                let tx_id_str = format!("0xgenesis02{:013}{}", 0, addr_lower);
-                let tx_id = H256::from_slice(&keccak256(tx_id_str.as_bytes())[..]);
+                // tx id: 0xgenesis02 + 13 zeros + address(42 chars) = 67 chars
+                let tx_id = format!("0xgenesis02{:013}{}", 0, addr_lower);
 
                 let tx = DebankTransaction {
-                    id: tx_id.into(),
+                    id: tx_id.clone(),
                     from: zero_addr,
                     to: *addr,
                     gas_limit: 0,
@@ -735,7 +733,7 @@ pub fn build_genesis_txs_and_traces(
                 txs.push(tx);
 
                 // trace id = hash(tx_id, parent_trace_id, pos_in_parent_trace)
-                let trace_id = DebankTrace::calculate_id(vec![&tx_id.to_string(), "", "0"]);
+                let trace_id = DebankTrace::calculate_id(vec![&tx_id, "", "0"]);
                 let trace = DebankTrace {
                     id: trace_id,
                     from_addr: zero_addr,
@@ -766,11 +764,10 @@ pub fn build_genesis_txs_and_traces(
     let native_token_addr =
         Address::from_str("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap();
     let native_token_addr_lower = format!("{:?}", native_token_addr).to_lowercase();
-    let native_token_tx_id_str = format!("0xgenesis03{:013}{}", 0, native_token_addr_lower);
-    let native_token_tx_id = H256::from_slice(&keccak256(native_token_tx_id_str.as_bytes())[..]);
+    let native_token_tx_id = format!("0xgenesis03{:013}{}", 0, native_token_addr_lower);
 
     let native_token_tx = DebankTransaction {
-        id: native_token_tx_id.into(),
+        id: native_token_tx_id.clone(),
         from: zero_addr,
         to: native_token_addr,
         gas_limit: 0,
@@ -786,8 +783,7 @@ pub fn build_genesis_txs_and_traces(
     };
     txs.push(native_token_tx);
 
-    let native_token_trace_id =
-        DebankTrace::calculate_id(vec![&native_token_tx_id.to_string(), "", "0"]);
+    let native_token_trace_id = DebankTrace::calculate_id(vec![&native_token_tx_id, "", "0"]);
     let native_token_trace = DebankTrace {
         id: native_token_trace_id,
         from_addr: zero_addr,
