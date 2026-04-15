@@ -3,7 +3,7 @@
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
 use crate::FromEvmError;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
 use reth_chainspec::ChainSpecProvider;
@@ -17,7 +17,11 @@ use reth_revm::{
     database::StateProviderDatabase,
     db::{bal::EvmDatabaseError, State},
 };
-use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError};
+use reth_rpc_eth_types::{
+    cache::db::{StateCacheDb, StateDiffDb, StateDiffTraceDB, StateProviderTraitObjWrapper},
+    debank::{get_storage_diffs_from_cache, BlockStorageDiff},
+    EthApiError,
+};
 use reth_storage_api::{ProviderBlock, ProviderTx};
 use revm::{context::Block, context_interface::result::ResultAndState, DatabaseCommit};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -427,5 +431,104 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         })?;
 
         Ok(())
+    }
+
+    /// Executes all transactions of a block while collecting tracing output and the resulting
+    /// [`BlockStorageDiff`].
+    ///
+    /// This uses a [`StateDiffTraceDB`] wrapper around the state cache database so that every
+    /// committed change is also captured in an in-memory diff database. After replay, the diff is
+    /// compared against a fresh read-only snapshot of the parent state (`pre_db`) to compute the
+    /// final [`BlockStorageDiff`]. This mirrors the behaviour of go-ethereum's `OnCommit` based
+    /// tracer but without requiring any changes to the core EVM.
+    fn trace_all_block<Setup, Insp, F, R>(
+        &self,
+        block_id: BlockId,
+        mut inspector_setup: Setup,
+        f: F,
+    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff, Vec<Address>), Self::Error>> + Send
+    where
+        Self: LoadBlock,
+        F: Fn(
+                TransactionInfo,
+                TracingCtx<
+                    '_,
+                    Recovered<&ProviderTx<Self::Provider>>,
+                    EvmFor<Self::Evm, &mut StateDiffDb, Insp>,
+                >,
+            ) -> Result<R, Self::Error>
+            + Send
+            + 'static,
+        Setup: FnMut() -> Insp + Send + 'static,
+        Insp: Clone + for<'a> InspectorFor<Self::Evm, &'a mut StateDiffDb>,
+        R: Send + 'static,
+    {
+        async move {
+            let block = self.recovered_block(block_id);
+
+            let ((evm_env, _), block) = futures::try_join!(self.evm_env_at(block_id), block)?;
+
+            let Some(block) = block else {
+                return Err(EthApiError::EvmCustom(format!("cannot find block {block_id}")).into());
+            };
+
+            self.spawn_blocking_io_fut(move |this| async move {
+                let state_at = block.parent_hash();
+                let block_hash = block.hash();
+
+                let block_number = evm_env.block_env.number().saturating_to();
+                let base_fee = evm_env.block_env.basefee();
+
+                // Load two independent state providers for the parent block: one for execution
+                // (wrapped in [`StateDiffTraceDB`]) and one as a read-only pre-state snapshot used
+                // to compute the diff.
+                let pre_state = this.state_at_block_id(state_at.into()).await?;
+                let exec_state = this.state_at_block_id(state_at.into()).await?;
+
+                let pre_db =
+                    StateProviderDatabase::new(StateProviderTraitObjWrapper(pre_state));
+                let inner_db = State::builder()
+                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
+                        exec_state,
+                    )))
+                    .with_bundle_update()
+                    .build();
+                let mut db = StateDiffTraceDB::new(inner_db);
+
+                this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+
+                let mut idx = 0;
+
+                let results: Vec<R> = this
+                    .evm_config()
+                    .evm_factory()
+                    .create_tracer(&mut db, evm_env, inspector_setup())
+                    .try_trace_many(block.transactions_recovered(), |ctx| {
+                        let tx_info = TransactionInfo {
+                            hash: Some(*ctx.tx.tx_hash()),
+                            index: Some(idx),
+                            block_hash: Some(block_hash),
+                            block_number: Some(block_number),
+                            base_fee: Some(base_fee),
+                        };
+                        idx += 1;
+
+                        f(tx_info, ctx)
+                    })
+                    .commit_last_tx()
+                    .collect::<Result<_, _>>()?;
+
+                let storage_contracts: Vec<Address> = db
+                    .diff
+                    .cache
+                    .accounts
+                    .iter()
+                    .filter_map(|(addr, acc)| (!acc.storage.is_empty()).then_some(*addr))
+                    .collect();
+                let diff = get_storage_diffs_from_cache(db.diff.cache, pre_db);
+                Ok((results, diff, storage_contracts))
+            })
+            .await
+        }
     }
 }
