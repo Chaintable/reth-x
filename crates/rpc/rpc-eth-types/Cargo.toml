@@ -38,8 +38,15 @@ alloy-transport.workspace = true
 alloy-rpc-client = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types-eth.workspace = true
 alloy-network.workspace = true
+alloy-rlp.workspace = true
+alloy-genesis.workspace = true
 revm.workspace = true
+revm-bytecode.workspace = true
 revm-inspectors.workspace = true
+
+# debank
+md-5.workspace = true
+sha1.workspace = true
 
 # rpc
 jsonrpsee-core.workspace = true
