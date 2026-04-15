@@ -10474,6 +10474,7 @@ dependencies = [
  "reth-transaction-pool",
  "reth-trie-common",
  "revm",
+ "revm-bytecode",
  "revm-inspectors",
  "revm-primitives",
  "rust-eth-triedb",

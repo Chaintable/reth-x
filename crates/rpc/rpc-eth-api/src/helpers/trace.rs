@@ -3,7 +3,7 @@
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
 use crate::FromEvmError;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
 use reth_chainspec::ChainSpecProvider;
@@ -446,7 +446,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         block_id: BlockId,
         mut inspector_setup: Setup,
         f: F,
-    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff, Vec<Address>), Self::Error>> + Send
+    ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff), Self::Error>> + Send
     where
         Self: LoadBlock,
         F: Fn(
@@ -518,15 +518,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
 
-                let storage_contracts: Vec<Address> = db
-                    .diff
-                    .cache
-                    .accounts
-                    .iter()
-                    .filter_map(|(addr, acc)| (!acc.storage.is_empty()).then_some(*addr))
-                    .collect();
                 let diff = get_storage_diffs_from_cache(db.diff.cache, pre_db);
-                Ok((results, diff, storage_contracts))
+                Ok((results, diff))
             })
             .await
         }
