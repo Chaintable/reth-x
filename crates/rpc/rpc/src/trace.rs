@@ -28,8 +28,8 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{
     debank::{
-        build_debank_traces, get_storage_contracts_from_genesis, BlockFile, BlockStorageDiff,
-        DebankBlock, DebankOutPut, DebankTransaction,
+        build_debank_traces, build_genesis_txs_and_traces, get_storage_contracts_from_genesis,
+        BlockFile, BlockStorageDiff, DebankBlock, DebankOutPut, DebankTransaction,
     },
     error::EthApiError,
     utils::recover_raw_transaction,
@@ -660,13 +660,16 @@ where
 
         // Genesis block: derive diff directly from genesis alloc.
         if block.number() == 0 {
-            let mut state_diff: BlockStorageDiff = self.provider().chain_spec().genesis().into();
+            let chain_spec = self.provider().chain_spec();
+            let genesis = chain_spec.genesis();
+            let mut state_diff: BlockStorageDiff = genesis.into();
             state_diff.hash = block.state_root();
+            let (transactions, traces) = build_genesis_txs_and_traces(genesis);
             let block_file = BlockFile {
                 block: debank_block,
-                storage_contracts: get_storage_contracts_from_genesis(
-                    self.provider().chain_spec().genesis(),
-                ),
+                transactions,
+                traces,
+                storage_contracts: get_storage_contracts_from_genesis(genesis),
                 ..Default::default()
             };
             let validation_hash = block_file.validation().validation_hash;
@@ -727,7 +730,7 @@ where
                 },
                 move |tx_info, mut ctx| {
                     Ok(build_debank_traces(
-                        tx_info.hash.unwrap(),
+                        tx_info.hash.unwrap().to_string(),
                         ctx.take_inspector().into_traces(),
                         &log_index,
                     ))
