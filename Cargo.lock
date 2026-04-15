@@ -10513,6 +10513,7 @@ dependencies = [
  "reth-engine-primitives",
  "reth-network-peers",
  "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
  "reth-trie-common",
  "serde_json",
  "tokio",
