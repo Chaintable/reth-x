@@ -267,18 +267,29 @@ pub struct DebankTransaction {
     pub value: U256,
 }
 
-impl<R, T> From<(&R, &T, Option<u64>)> for DebankTransaction
+
+impl<R, T> From<(&R, &T, Option<u64>, Option<u128>)> for DebankTransaction
 where
     R: ReceiptResponse,
     T: Transaction,
 {
-    fn from((receipt, tx, deposit_nonce): (&R, &T, Option<u64>)) -> Self {
+    fn from((receipt, tx, deposit_nonce, l1_fee): (&R, &T, Option<u64>, Option<u128>)) -> Self {
+        let gas_price = match l1_fee {
+            None =>  U256::from(receipt.effective_gas_price()),
+            Some(l1_fee) => {
+                let effective_gas_price = U256::from(receipt.effective_gas_price());
+                let gas_used = U256::from(receipt.gas_used());
+                let l1_fee = U256::from(l1_fee);
+                let gas_price = (l1_fee / gas_used) + effective_gas_price;
+                gas_price
+            }
+        };
         Self {
             id: receipt.transaction_hash().to_string(),
             from: receipt.from(),
             to: receipt.to().unwrap_or_default(),
             gas_limit: tx.gas_limit(),
-            gas_price: receipt.effective_gas_price(),
+            gas_price: gas_price.to(),
             gas_used: receipt.gas_used(),
             status: receipt.status(),
             gas_fee_cap: tx.max_fee_per_gas(),
