@@ -50,6 +50,9 @@ pub trait ReceiptConverter<N: NodePrimitives>: Debug + 'static {
     /// Gets the deposit nonce from a receipt if available.
     fn get_deposit_nonce(&self, receipt_response: &Self::RpcReceipt) -> Option<u64>;
 
+    /// Gets the l1 fee from a receipt if available.
+    fn get_l1_fee(&self, receipt_response: &Self::RpcReceipt) -> Option<u128>;
+
     /// Converts a set of primitive receipts to RPC representations. It is guaranteed that all
     /// receipts are from `block`.
     fn convert_receipts_with_block(
@@ -182,6 +185,11 @@ pub trait RpcConvert: Send + Sync + Unpin + Debug + DynClone + 'static {
     /// Gets the deposit nonce from an RPC receipt if available.
     /// Returns `None` for non-deposit transactions or chains that don't support deposits.
     fn get_deposit_nonce(&self, _receipt: &RpcReceipt<Self::Network>) -> Option<u64> {
+        None
+    }
+    /// Gets the l1 fee from a receipt if available.
+    /// Returns `None` for non-op transactions or chains that don't support l1 fee.
+    fn get_l1_fee(&self, _receipt: &RpcReceipt<Self::Network>) -> Option<u128> {
         None
     }
 
@@ -868,6 +876,10 @@ where
 
     fn get_deposit_nonce(&self, receipt: &RpcReceipt<Self::Network>) -> Option<u64> {
         self.receipt_converter.get_deposit_nonce(receipt)
+    }
+
+    fn get_l1_fee(&self, receipt: &RpcReceipt<Self::Network>) -> Option<u128> {
+        self.receipt_converter.get_l1_fee(receipt)
     }
 
     fn convert_header(

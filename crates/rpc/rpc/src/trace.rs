@@ -453,8 +453,8 @@ where
             }
 
             // Skips the first `after` number of matching traces.
-            if let Some(cutoff) = after.map(|a| a as usize)
-                && cutoff < all_traces.len()
+            if let Some(cutoff) = after.map(|a| a as usize) &&
+                cutoff < all_traces.len()
             {
                 all_traces.drain(..cutoff);
                 // we removed the first `after` traces
@@ -473,8 +473,8 @@ where
 
         // If `after` is greater than or equal to the number of matched traces, it returns an
         // empty array.
-        if let Some(cutoff) = after.map(|a| a as usize)
-            && cutoff >= all_traces.len()
+        if let Some(cutoff) = after.map(|a| a as usize) &&
+            cutoff >= all_traces.len()
         {
             return Ok(vec![]);
         }
@@ -506,8 +506,8 @@ where
         let mut maybe_traces =
             maybe_traces.map(|traces| traces.into_iter().flatten().collect::<Vec<_>>());
 
-        if let (Some(block), Some(traces)) = (maybe_block, maybe_traces.as_mut())
-            && let Some(base_block_reward) = self.calculate_base_block_reward(block.header())?
+        if let (Some(block), Some(traces)) = (maybe_block, maybe_traces.as_mut()) &&
+            let Some(base_block_reward) = self.calculate_base_block_reward(block.header())?
         {
             traces.extend(self.extract_reward_traces(
                 block.header(),
@@ -693,7 +693,8 @@ where
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
             let deposit_nonce: Option<u64> = self.eth_api().converter().get_deposit_nonce(receipt);
-            let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce).into();
+            let l1_fee: Option<u128> = self.eth_api().converter().get_l1_fee(receipt);
+            let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce, l1_fee).into();
             debank_txs.push(debank_tx);
         }
 

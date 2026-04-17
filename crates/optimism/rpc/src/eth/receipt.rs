@@ -108,6 +108,9 @@ where
             _ => None,
         }
     }
+    fn get_l1_fee(&self, receipt_response: &Self::RpcReceipt) -> Option<u128>{
+        receipt_response.l1_block_info.l1_fee
+    }
 }
 
 /// L1 fee and data gas for a non-deposit transaction, or deposit nonce and receipt version for a
