@@ -14,6 +14,7 @@ use url as _;
 pub mod block;
 pub mod builder;
 pub mod cache;
+#[allow(missing_docs)]
 pub mod debank;
 pub mod error;
 pub mod fee_history;

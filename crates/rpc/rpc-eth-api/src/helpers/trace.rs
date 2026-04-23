@@ -426,11 +426,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 
         // apply relevant system calls
         let mut evm = self.evm_config().evm_with_env(db, evm_env.clone());
-        system_caller
-            .apply_blockhashes_contract_call(block.header().parent_hash(), &mut evm)
-            .map_err(|err| {
-                EthApiError::EvmCustom(format!("failed to apply 2935 system call {err}"))
-            })?;
+        system_caller.apply_pre_execution_changes(block.header(), &mut evm).map_err(|err| {
+            EthApiError::EvmCustom(format!("failed to apply 4788 system call {err}"))
+        })?;
 
         Ok(())
     }
@@ -487,8 +485,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let pre_state = this.state_at_block_id(state_at.into()).await?;
                 let exec_state = this.state_at_block_id(state_at.into()).await?;
 
-                let pre_db =
-                    StateProviderDatabase::new(StateProviderTraitObjWrapper(pre_state));
+                let pre_db = StateProviderDatabase::new(StateProviderTraitObjWrapper(pre_state));
                 let inner_db = State::builder()
                     .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
                         exec_state,

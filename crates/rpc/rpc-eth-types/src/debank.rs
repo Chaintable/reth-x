@@ -1,5 +1,4 @@
-use alloy_consensus::constants::KECCAK_EMPTY;
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader};
 use alloy_genesis::Genesis;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{
@@ -10,11 +9,12 @@ use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
 use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
-use revm::interpreter::InstructionResult;
-use revm::DatabaseRef;
+use revm::{interpreter::InstructionResult, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
-use revm_inspectors::tracing::types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder};
-use revm_inspectors::tracing::CallTraceArena;
+use revm_inspectors::tracing::{
+    types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder},
+    CallTraceArena,
+};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::str::FromStr;
@@ -224,7 +224,7 @@ pub struct DebankBlock {
     pub gas_limit: u64,
     pub gas_used: u64,
     pub timestamp: u64,
-    pub process_start_timestamp: u64,
+    pub process_start_timestamp: u128,
 }
 
 impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
@@ -233,7 +233,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
             id: block.hash(),
             height: block.header().number(),
             parent_id: block.header().parent_hash(),
-            base_fee_per_gas: block.header().base_fee_per_gas().or(Some(0)),
+            base_fee_per_gas: block.header().base_fee_per_gas(),
             miner: block.header().beneficiary(),
             gas_limit: block.header().gas_limit(),
             gas_used: block.header().gas_used(),
@@ -241,7 +241,7 @@ impl<B: Block> From<&RecoveredBlock<B>> for DebankBlock {
             process_start_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs(),
+                .as_millis(),
         }
     }
 }
@@ -302,7 +302,6 @@ pub struct DebankEvent {
     pub selector: String,
     pub topics: Vec<String>,
     pub data: Bytes,
-    pub tx_id: String,
     pub parent_trace_id: String,
     pub pos_in_parent_trace: usize,
     pub idx: usize,
@@ -416,12 +415,12 @@ pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
     }
     let msg = match res {
         InstructionResult::Revert => "Reverted".to_string(),
-        InstructionResult::OutOfGas
-        | InstructionResult::PrecompileOOG
-        | InstructionResult::MemoryOOG
-        | InstructionResult::MemoryLimitOOG
-        | InstructionResult::InvalidOperandOOG
-        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfGas |
+        InstructionResult::PrecompileOOG |
+        InstructionResult::MemoryOOG |
+        InstructionResult::MemoryLimitOOG |
+        InstructionResult::InvalidOperandOOG |
+        InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
         InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
         InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
             "Bad instruction".to_string()
@@ -437,18 +436,15 @@ pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
 impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
-        let mut call_create_type = match trace.kind {
-            CallKind::Call
-            | CallKind::StaticCall
-            | CallKind::CallCode
-            | CallKind::DelegateCall
-            | CallKind::AuthCall => "call".to_string(),
+        let call_create_type = match trace.kind {
+            CallKind::Call |
+            CallKind::StaticCall |
+            CallKind::CallCode |
+            CallKind::DelegateCall |
+            CallKind::AuthCall => "call".to_string(),
             CallKind::Create => "create".to_string(),
             CallKind::Create2 => "create2".to_string(),
         };
-        if call_trace.is_selfdestruct() {
-            call_create_type = "suicide".to_string();
-        }
         let mut call_type = "".to_string();
         if call_create_type == "call" {
             call_type = trace.kind.to_string().to_lowercase();
@@ -469,13 +465,11 @@ impl From<&CallTraceNode> for DebankTrace {
             error: error.unwrap_or_default(),
             ..Default::default()
         };
-        if call_trace.is_selfdestruct() {
-            debank_trace.call_create_type = "suicide".to_string();
-        }
         for op in trace.steps.iter() {
             if op.op == OpCode::SSTORE {
                 debank_trace.self_storage_change = true;
                 debank_trace.storage_change = true;
+                break;
             }
         }
         debank_trace
@@ -517,10 +511,12 @@ fn build_trace_node(
     log_index: &mut usize,
     change_address: &mut std::collections::HashSet<Address>,
 ) -> DebankTraceNode {
-    for op in node.trace.steps.iter() {
-        if op.op == OpCode::SSTORE {
-            change_address.insert(node.execution_address());
-            break;
+    if parent_success && node.trace.success {
+        for op in node.trace.steps.iter() {
+            if op.op == OpCode::SSTORE {
+                change_address.insert(node.execution_address());
+                break;
+            }
         }
     }
     let mut debank_node = DebankTraceNode {
@@ -541,9 +537,6 @@ fn build_trace_node(
         match &pos {
             TraceMemberOrder::Call(i) => {
                 let child_node = &nodes[node.children[*i]];
-                if !child_node.trace.success {
-                    continue;
-                }
                 let mut trace_address = trace_address.clone();
                 trace_address.push(*i);
                 let child_trace = build_trace_node(
@@ -552,12 +545,12 @@ fn build_trace_node(
                     debank_node.children.len(),
                     child_node,
                     nodes,
-                    debank_node.success,
+                    parent_success && debank_node.success,
                     trace_address,
                     log_index,
                     change_address,
                 );
-                if child_trace.trace.storage_change {
+                if child_trace.trace.storage_change && child_node.trace.success {
                     debank_node.trace.storage_change = true;
                 }
                 debank_node.children.push(DebankTraceOrLog::Trace(child_trace));
@@ -566,7 +559,6 @@ fn build_trace_node(
                 let mut child_event: DebankEvent = (&node.logs[*i]).into();
                 child_event.pos_in_parent_trace = debank_node.children.len();
                 child_event.contract_id = contract_id;
-                child_event.tx_id = tx_id.clone();
                 child_event.parent_trace_id = id.clone();
                 child_event.id = child_event.debank_id();
                 child_event.idx = *log_index;
@@ -578,6 +570,31 @@ fn build_trace_node(
             _ => {}
         }
     }
+    // selfdestructs are not recorded as individual call traces but are derived from
+    // the call trace and are added as additional `TransactionTrace` objects in the
+    // trace array
+    if node.is_selfdestruct() {
+        let mut suicide_trace_address = trace_address.clone();
+        suicide_trace_address.push(node.children.len());
+        debank_node.trace.subtraces += 1;
+        let mut selfdestruct_trace = DebankTrace {
+            from_addr: node.trace.selfdestruct_address.unwrap_or_default(),
+            to_addr: node.trace.selfdestruct_refund_target.unwrap_or_default(),
+            value: node.trace.selfdestruct_transferred_value.unwrap_or_default(),
+            trace_address: suicide_trace_address,
+            parent_trace_id: id.clone(),
+            pos_in_parent_trace: debank_node.children.len(),
+            tx_id: tx_id.clone(),
+            call_create_type: "suicide".to_string(),
+            ..Default::default()
+        };
+        selfdestruct_trace.id = selfdestruct_trace.debank_id();
+        debank_node.children.push(DebankTraceOrLog::Trace(DebankTraceNode {
+            trace: selfdestruct_trace,
+            children: vec![],
+            success: parent_success && debank_node.success,
+        }));
+    }
     debank_node
 }
 
@@ -588,7 +605,7 @@ fn finish_build_traces(
     events: &mut Vec<DebankEvent>,
     error_events: &mut Vec<DebankEvent>,
 ) {
-    if node.trace.error.is_empty() {
+    if node.success {
         traces.push(node.trace.clone());
     } else {
         error_traces.push(node.trace.clone());

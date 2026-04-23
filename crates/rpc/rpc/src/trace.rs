@@ -23,7 +23,9 @@ use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_rpc_api::TraceApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{block::EthBlocks, Call, LoadPendingBlock, LoadReceipt, LoadTransaction, Trace, TraceExt},
+    helpers::{
+        block::EthBlocks, Call, LoadPendingBlock, LoadReceipt, LoadTransaction, Trace, TraceExt,
+    },
     FromEthApiError, RpcNodeCore,
 };
 use reth_rpc_eth_types::{
@@ -625,10 +627,7 @@ where
     Eth: TraceExt + EthBlocks + LoadReceipt + 'static,
 {
     /// Returns debank-specific tracing information for the given block.
-    pub async fn trace_debank_block(
-        &self,
-        block_id: BlockId,
-    ) -> Result<DebankOutPut, Eth::Error> {
+    pub async fn trace_debank_block(&self, block_id: BlockId) -> Result<DebankOutPut, Eth::Error> {
         let block = self.eth_api().recovered_block(block_id).await?;
         let Some(block) = block else { return Err(EthApiError::HeaderNotFound(block_id).into()) };
         let debank_block: DebankBlock = block.as_ref().into();
