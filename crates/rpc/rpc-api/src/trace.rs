@@ -7,6 +7,7 @@ use alloy_rpc_types_trace::{
     parity::*,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use reth_rpc_eth_types::debank::DebankOutPut;
 
 /// Ethereum trace API
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "trace"))]
@@ -106,4 +107,8 @@ pub trait TraceApi<TxReq> {
     /// This is the same as `trace_transactionOpcodeGas` but for all transactions in a block.
     #[method(name = "blockOpcodeGas")]
     async fn trace_block_opcode_gas(&self, block_id: BlockId) -> RpcResult<Option<BlockOpcodeGas>>;
+
+    /// Returns debank's trace information for a given block.
+    #[method(name = "debankBlock")]
+    async fn trace_debank_block(&self, block_id: BlockId) -> RpcResult<DebankOutPut>;
 }

@@ -43,8 +43,8 @@ use reth_rpc::{
 use reth_rpc_api::servers::*;
 use reth_rpc_eth_api::{
     helpers::{
-        pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions, LoadPendingBlock,
-        TraceExt,
+        block::EthBlocks, pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions,
+        LoadPendingBlock, LoadReceipt, TraceExt,
     },
     node::RpcNodeCoreAdapter,
     EthApiServer, EthApiTypes, FullEthApiServer, FullEthApiTypes, RpcBlock, RpcConvert,
@@ -715,7 +715,7 @@ where
     /// If called outside of the tokio runtime. See also [`Self::eth_api`]
     pub fn register_trace(&mut self) -> &mut Self
     where
-        EthApi: TraceExt,
+        EthApi: TraceExt + EthBlocks + LoadReceipt,
     {
         let trace_api = self.trace_api();
         self.modules.insert(RethRpcModule::Trace, trace_api.into_rpc().into());
