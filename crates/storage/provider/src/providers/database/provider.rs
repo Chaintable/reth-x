@@ -194,6 +194,9 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     minimum_pruning_distance: u64,
     /// Database provider metrics
     metrics: metrics::DatabaseProviderMetrics,
+    /// Shared cache of [`PipelineGapIndex`] used to serve historical reads while pipeline sync
+    /// has the Execution stage ahead of history index stages.
+    pipeline_gap_cache: Arc<crate::providers::state::pipeline_gap::PipelineGapCache>,
 }
 
 impl<TX: Debug, N: NodeTypes> Debug for DatabaseProvider<TX, N> {
@@ -218,6 +221,25 @@ impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
     pub const fn prune_modes_ref(&self) -> &PruneModes {
         &self.prune_modes
     }
+
+    /// Override the shared [`PipelineGapCache`] used by historical state reads.
+    ///
+    /// `ProviderFactory` calls this after constructing each provider so that all providers in a
+    /// process share a single cache rather than each rebuilding the gap index on first use.
+    pub fn with_pipeline_gap_cache(
+        mut self,
+        cache: Arc<crate::providers::state::pipeline_gap::PipelineGapCache>,
+    ) -> Self {
+        self.pipeline_gap_cache = cache;
+        self
+    }
+
+    /// Returns the shared pipeline gap cache.
+    pub const fn pipeline_gap_cache(
+        &self,
+    ) -> &Arc<crate::providers::state::pipeline_gap::PipelineGapCache> {
+        &self.pipeline_gap_cache
+    }
 }
 
 impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
@@ -237,6 +259,10 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     /// During pipeline sync the Execution stage commits `PlainState` before the history index
     /// stages run. This helper detects that gap so [`HistoricalStateProviderRef`] can reject
     /// `InPlainState` reads that would return data from a future block.
+    pub(crate) fn build_pipeline_consistency_for_gap(&self) -> ProviderResult<PipelineConsistency> {
+        self.build_pipeline_consistency()
+    }
+
     fn build_pipeline_consistency(&self) -> ProviderResult<PipelineConsistency> {
         let execution_tip = self.get_stage_checkpoint(StageId::Execution)?.map(|c| c.block_number);
         let account_history_tip =
@@ -244,6 +270,29 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         let storage_history_tip =
             self.get_stage_checkpoint(StageId::IndexStorageHistory)?.map(|c| c.block_number);
         Ok(PipelineConsistency { execution_tip, account_history_tip, storage_history_tip })
+    }
+
+    /// Returns the [`PipelineGapIndex`] covering the current pipeline gaps, or `None` when
+    /// neither dimension has a gap. The cache rebuilds on first access after the
+    /// `(execution_tip, account_history_tip, storage_history_tip)` tuple changes; account and
+    /// storage tips are tracked independently so the per-dimension gap window is exact.
+    fn build_pipeline_gap_index(
+        &self,
+        consistency: &PipelineConsistency,
+    ) -> ProviderResult<Option<Arc<crate::providers::state::pipeline_gap::PipelineGapIndex>>>
+    where
+        Self: ChangeSetReader + StorageSettingsCache,
+    {
+        let Some(execution_tip) = consistency.execution_tip else { return Ok(None) };
+        // None means "stage has never run", treat as 0 so the gap covers everything from genesis.
+        let account_history_tip = consistency.account_history_tip.unwrap_or(0);
+        let storage_history_tip = consistency.storage_history_tip.unwrap_or(0);
+        self.pipeline_gap_cache.get_or_build(
+            self,
+            execution_tip,
+            account_history_tip,
+            storage_history_tip,
+        )
     }
 
     /// Storage provider for state at that given block hash
@@ -262,6 +311,8 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             return Ok(Box::new(LatestStateProviderRef::new(self)))
         }
 
+        let pipeline_gap_index = self.build_pipeline_gap_index(&pipeline_consistency)?;
+
         // +1 as the changeset that we want is the one that was applied after this block.
         block_number += 1;
 
@@ -271,7 +322,8 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
         let mut state_provider = HistoricalStateProviderRef::new(self, block_number)
-            .with_pipeline_consistency(pipeline_consistency);
+            .with_pipeline_consistency(pipeline_consistency)
+            .with_pipeline_gap_index(pipeline_gap_index);
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -366,6 +418,9 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
             pending_rocksdb_batches: Default::default(),
             minimum_pruning_distance: MINIMUM_PRUNING_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
+            pipeline_gap_cache: Arc::new(
+                crate::providers::state::pipeline_gap::PipelineGapCache::new(),
+            ),
         }
     }
 }
@@ -900,6 +955,8 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
             return Ok(Box::new(LatestStateProvider::new(self)))
         }
 
+        let pipeline_gap_index = self.build_pipeline_gap_index(&pipeline_consistency)?;
+
         // +1 as the changeset that we want is the one that was applied after this block.
         block_number += 1;
 
@@ -909,7 +966,8 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
             self.get_prune_checkpoint(PruneSegment::StorageHistory)?;
 
         let mut state_provider = HistoricalStateProvider::new(self, block_number)
-            .with_pipeline_consistency(pipeline_consistency);
+            .with_pipeline_consistency(pipeline_consistency)
+            .with_pipeline_gap_index(pipeline_gap_index);
 
         // If we pruned account or storage history, we can't return state on every historical block.
         // Instead, we should cap it at the latest prune checkpoint for corresponding prune segment.
@@ -1020,6 +1078,9 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             pending_rocksdb_batches: Default::default(),
             minimum_pruning_distance: MINIMUM_PRUNING_DISTANCE,
             metrics: metrics::DatabaseProviderMetrics::default(),
+            pipeline_gap_cache: Arc::new(
+                crate::providers::state::pipeline_gap::PipelineGapCache::new(),
+            ),
         }
     }
 

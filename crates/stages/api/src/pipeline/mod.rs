@@ -398,6 +398,17 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                         provider_rw.commit()?;
 
+                        // Refresh gap cache on unwind too — execution_tip / history_tip can
+                        // decrease, and the cached index must reflect the post-unwind state.
+                        if matches!(
+                            stage_id,
+                            StageId::Execution |
+                                StageId::IndexAccountHistory |
+                                StageId::IndexStorageHistory
+                        ) {
+                            self.provider_factory.refresh_pipeline_gap_index()?;
+                        }
+
                         stage.post_unwind_commit()?;
 
                         provider_rw = self.provider_factory.database_provider_rw()?;
@@ -487,6 +498,20 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
 
                     // Commit processed data to the database.
                     provider_rw.commit()?;
+
+                    // After committing a stage whose checkpoint affects the pipeline gap window,
+                    // eagerly rebuild the gap index so RPC historical reads don't pay the cost
+                    // on the next query. The factory's default impl is a no-op, and
+                    // `ProviderFactory` overrides it to walk the changeset
+                    // tables for the new gap range.
+                    if matches!(
+                        stage_id,
+                        StageId::Execution |
+                            StageId::IndexAccountHistory |
+                            StageId::IndexStorageHistory
+                    ) {
+                        self.provider_factory.refresh_pipeline_gap_index()?;
+                    }
 
                     // Invoke stage post commit hook.
                     self.stage(stage_index).post_execute_commit()?;

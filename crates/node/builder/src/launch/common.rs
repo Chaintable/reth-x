@@ -707,6 +707,14 @@ where
             })?;
         }
 
+        // Prime the pipeline gap index from the now-finalized stage checkpoints. If the previous
+        // shutdown left Execution ahead of the history index stages, this walks the changeset
+        // tables once on startup so the first RPC historical query doesn't pay the rebuild cost.
+        // The call is a no-op when the pipeline is already consistent (exec_tip <= hist_tip).
+        if let Err(err) = factory.refresh_pipeline_gap_index() {
+            warn!(target: "reth::cli", %err, "failed to prime pipeline gap index on startup");
+        }
+
         Ok(factory)
     }
 

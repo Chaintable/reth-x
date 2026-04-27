@@ -155,6 +155,19 @@ pub trait DatabaseProviderFactory: Send + Sync {
 
     /// Create new read-write database provider.
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW>;
+
+    /// Eagerly rebuild any caches that depend on stage checkpoints — most importantly the
+    /// pipeline gap index used by historical state reads while pipeline sync has the Execution
+    /// stage ahead of history index stages.
+    ///
+    /// The pipeline driver is expected to call this after committing a stage whose checkpoint
+    /// influences the gap (Execution / `IndexAccountHistory` / `IndexStorageHistory`), so that
+    /// the next RPC historical query doesn't pay the rebuild cost.
+    ///
+    /// The default implementation is a no-op; concrete factories override it.
+    fn refresh_pipeline_gap_index(&self) -> ProviderResult<()> {
+        Ok(())
+    }
 }
 
 /// Helper type alias to get the associated transaction type from a [`DatabaseProviderFactory`].

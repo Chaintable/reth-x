@@ -77,6 +77,10 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     rocksdb_provider: RocksDBProvider,
     /// Changeset cache for trie unwinding
     changeset_cache: ChangesetCache,
+    /// Shared cache of [`PipelineGapIndex`] used by historical state providers when pipeline
+    /// sync has the Execution stage ahead of history index stages. Building the index walks the
+    /// changeset tables, so we share one cache across all providers in this process.
+    pipeline_gap_cache: Arc<crate::providers::state::pipeline_gap::PipelineGapCache>,
 }
 
 impl<N: NodeTypesForProvider> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -121,6 +125,9 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             storage_settings: Arc::new(RwLock::new(storage_settings)),
             rocksdb_provider,
             changeset_cache: ChangesetCache::new(),
+            pipeline_gap_cache: Arc::new(
+                crate::providers::state::pipeline_gap::PipelineGapCache::new(),
+            ),
         })
     }
 }
@@ -209,7 +216,8 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.storage_settings.clone(),
             self.rocksdb_provider.clone(),
             self.changeset_cache.clone(),
-        ))
+        )
+        .with_pipeline_gap_cache(self.pipeline_gap_cache.clone()))
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -218,16 +226,19 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// open.
     #[track_caller]
     pub fn provider_rw(&self) -> ProviderResult<DatabaseProviderRW<N::DB, N>> {
-        Ok(DatabaseProviderRW(DatabaseProvider::new_rw(
-            self.db.tx_mut()?,
-            self.chain_spec.clone(),
-            self.static_file_provider.clone(),
-            self.prune_modes.clone(),
-            self.storage.clone(),
-            self.storage_settings.clone(),
-            self.rocksdb_provider.clone(),
-            self.changeset_cache.clone(),
-        )))
+        Ok(DatabaseProviderRW(
+            DatabaseProvider::new_rw(
+                self.db.tx_mut()?,
+                self.chain_spec.clone(),
+                self.static_file_provider.clone(),
+                self.prune_modes.clone(),
+                self.storage.clone(),
+                self.storage_settings.clone(),
+                self.rocksdb_provider.clone(),
+                self.changeset_cache.clone(),
+            )
+            .with_pipeline_gap_cache(self.pipeline_gap_cache.clone()),
+        ))
     }
 
     /// State provider for latest block
@@ -276,6 +287,26 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
 
     fn database_provider_rw(&self) -> ProviderResult<Self::ProviderRW> {
         self.provider_rw().map(|provider| provider.0)
+    }
+
+    fn refresh_pipeline_gap_index(&self) -> ProviderResult<()> {
+        // Open a fresh read tx, read current stage checkpoints, rebuild the gap index. This
+        // walks `AccountChangeSets` / `StorageChangeSets` in the per-dimension gap ranges —
+        // seconds of CPU work for a large gap. The pipeline driver invokes this after a stage
+        // commit that affects the gap; calling it on every commit is fine because the no-gap
+        // case returns immediately and only one rebuild is in flight at a time (write-lock
+        // serialized inside `rebuild_sync`).
+        let provider = self.provider()?;
+        let consistency = provider.build_pipeline_consistency_for_gap()?;
+        let Some(execution_tip) = consistency.execution_tip else { return Ok(()) };
+        let account_history_tip = consistency.account_history_tip.unwrap_or(0);
+        let storage_history_tip = consistency.storage_history_tip.unwrap_or(0);
+        self.pipeline_gap_cache.rebuild_sync(
+            &provider,
+            execution_tip,
+            account_history_tip,
+            storage_history_tip,
+        )
     }
 }
 
@@ -660,6 +691,7 @@ where
             storage_settings,
             rocksdb_provider,
             changeset_cache,
+            pipeline_gap_cache: _,
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -685,6 +717,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             storage_settings: self.storage_settings.clone(),
             rocksdb_provider: self.rocksdb_provider.clone(),
             changeset_cache: self.changeset_cache.clone(),
+            pipeline_gap_cache: self.pipeline_gap_cache.clone(),
         }
     }
 }

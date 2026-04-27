@@ -1,6 +1,7 @@
 use crate::{
-    AccountReader, BlockHashReader, ChangeSetReader, EitherReader, HashedPostStateProvider,
-    ProviderError, RocksDBProviderFactory, StateProvider, StateRootProvider,
+    providers::state::pipeline_gap::PipelineGapIndex, AccountReader, BlockHashReader,
+    ChangeSetReader, EitherReader, HashedPostStateProvider, ProviderError, RocksDBProviderFactory,
+    StateProvider, StateRootProvider,
 };
 use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
@@ -30,7 +31,7 @@ use reth_trie_db::{
     DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness,
 };
 
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 /// Result of a history lookup for an account or storage slot.
 ///
@@ -111,6 +112,10 @@ pub struct HistoricalStateProviderRef<'b, Provider> {
     /// history index checkpoint, `PlainState` has been advanced beyond history coverage and the
     /// `InPlainState` fallback would return data from a future block.
     pipeline_consistency: PipelineConsistency,
+    /// Gap index covering `(history_tip, execution_tip]`. Built lazily by the provider factory
+    /// and shared across providers. When present, `InPlainState` reads can be served by reading
+    /// the changeset entry for the earliest gap modification of the requested key.
+    pipeline_gap_index: Option<Arc<PipelineGapIndex>>,
 }
 
 impl<'b, Provider: DBProvider + ChangeSetReader + BlockNumReader>
@@ -123,6 +128,7 @@ impl<'b, Provider: DBProvider + ChangeSetReader + BlockNumReader>
             block_number,
             lowest_available_blocks: Default::default(),
             pipeline_consistency: Default::default(),
+            pipeline_gap_index: None,
         }
     }
 
@@ -142,6 +148,7 @@ impl<'b, Provider: DBProvider + ChangeSetReader + BlockNumReader>
                 account_history_tip: None,
                 storage_history_tip: None,
             },
+            pipeline_gap_index: None,
         }
     }
 
@@ -152,6 +159,13 @@ impl<'b, Provider: DBProvider + ChangeSetReader + BlockNumReader>
         pipeline_consistency: PipelineConsistency,
     ) -> Self {
         self.pipeline_consistency = pipeline_consistency;
+        self
+    }
+
+    /// Attach a [`PipelineGapIndex`] so `InPlainState` reads can be served correctly while the
+    /// history index stages catch up to Execution.
+    pub fn with_pipeline_gap_index(mut self, gap_index: Option<Arc<PipelineGapIndex>>) -> Self {
+        self.pipeline_gap_index = gap_index;
         self
     }
 
@@ -293,11 +307,40 @@ impl<
                 if let Some((exec_tip, hist_tip)) =
                     self.pipeline_consistency.account_inconsistency()
                 {
-                    return Err(ProviderError::HistoryStateInconsistent {
-                        block: self.block_number,
-                        execution_tip: exec_tip,
-                        history_tip: hist_tip,
-                    })
+                    // Queries strictly inside the gap window cannot be answered: we'd need state
+                    // at an arbitrary mid-gap block (block_number > history_tip + 1 means the
+                    // requested state is at the end of some block > history_tip, which the gap
+                    // index — only tracking the FIRST gap modification — cannot reconstruct).
+                    //
+                    // The boundary case `block_number == history_tip + 1` (state at end of
+                    // history_tip) IS answerable because all modifications up to history_tip are
+                    // in the history index and any modification in the gap window has its
+                    // before-value cached.
+                    if self.block_number > hist_tip + 1 {
+                        return Err(ProviderError::HistoryStateInconsistent {
+                            block: self.block_number,
+                            execution_tip: exec_tip,
+                            history_tip: hist_tip,
+                        })
+                    }
+                    if let Some(gap) = &self.pipeline_gap_index {
+                        if let Some(info) = gap.find_account_before(self.provider, *address)? {
+                            // Earliest gap modification's before-value equals the value at end of
+                            // history_tip. Combined with `query_block <= history_tip` and the
+                            // history-index lookup returning InPlainState (i.e. no modification in
+                            // (query_block, history_tip]), this is the value at start of
+                            // query_block.
+                            return Ok(info)
+                        }
+                        // Fall through: address not modified in gap → PlainState is correct.
+                    } else {
+                        // Gap exists but no index built (factory didn't supply one). Be safe.
+                        return Err(ProviderError::HistoryStateInconsistent {
+                            block: self.block_number,
+                            execution_tip: exec_tip,
+                            history_tip: hist_tip,
+                        })
+                    }
                 }
                 Ok(self.tx().get_by_encoded_key::<tables::PlainAccountState>(address)?)
             }
@@ -471,11 +514,31 @@ impl<
                 if let Some((exec_tip, hist_tip)) =
                     self.pipeline_consistency.storage_inconsistency()
                 {
-                    return Err(ProviderError::HistoryStateInconsistent {
-                        block: self.block_number,
-                        execution_tip: exec_tip,
-                        history_tip: hist_tip,
-                    })
+                    // See `basic_account` for the boundary reasoning. block_number == hist_tip+1
+                    // is still answerable; block_number > hist_tip+1 is mid-gap and not.
+                    if self.block_number > hist_tip + 1 {
+                        return Err(ProviderError::HistoryStateInconsistent {
+                            block: self.block_number,
+                            execution_tip: exec_tip,
+                            history_tip: hist_tip,
+                        })
+                    }
+                    if let Some(gap) = &self.pipeline_gap_index {
+                        if let Some(entry) =
+                            gap.find_storage_before(self.tx(), address, storage_key)?
+                        {
+                            // Slot was modified in the gap — return the before-value at the
+                            // earliest gap block.
+                            return Ok(Some(entry.value))
+                        }
+                        // Fall through: slot not modified in gap → PlainState is correct.
+                    } else {
+                        return Err(ProviderError::HistoryStateInconsistent {
+                            block: self.block_number,
+                            execution_tip: exec_tip,
+                            history_tip: hist_tip,
+                        })
+                    }
                 }
                 Ok(self
                     .tx()
@@ -510,6 +573,8 @@ pub struct HistoricalStateProvider<Provider> {
     lowest_available_blocks: LowestAvailableBlocks,
     /// Cached pipeline consistency info.
     pipeline_consistency: PipelineConsistency,
+    /// Optional gap index (see [`HistoricalStateProviderRef::pipeline_gap_index`]).
+    pipeline_gap_index: Option<Arc<PipelineGapIndex>>,
 }
 
 impl<Provider: DBProvider + ChangeSetReader + BlockNumReader> HistoricalStateProvider<Provider> {
@@ -520,6 +585,7 @@ impl<Provider: DBProvider + ChangeSetReader + BlockNumReader> HistoricalStatePro
             block_number,
             lowest_available_blocks: Default::default(),
             pipeline_consistency: Default::default(),
+            pipeline_gap_index: None,
         }
     }
 
@@ -551,15 +617,23 @@ impl<Provider: DBProvider + ChangeSetReader + BlockNumReader> HistoricalStatePro
         self
     }
 
+    /// Attach a [`PipelineGapIndex`] so `InPlainState` reads can be served correctly while the
+    /// history index stages catch up to Execution.
+    pub fn with_pipeline_gap_index(mut self, gap_index: Option<Arc<PipelineGapIndex>>) -> Self {
+        self.pipeline_gap_index = gap_index;
+        self
+    }
+
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
-    const fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
+    fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
         HistoricalStateProviderRef::new_with_lowest_available_blocks(
             &self.provider,
             self.block_number,
             self.lowest_available_blocks,
         )
         .with_pipeline_consistency(self.pipeline_consistency)
+        .with_pipeline_gap_index(self.pipeline_gap_index.clone())
     }
 }
 
@@ -1192,5 +1266,307 @@ mod tests {
             HistoricalStateProviderRef::new(&db, 5).with_pipeline_consistency(consistent);
         let result = provider.basic_account(&no_history_addr);
         assert!(result.is_ok(), "Should succeed when consistent: {result:?}");
+    }
+
+    /// Verifies the gap fallback for `InPlainState` reads:
+    /// - Account modified in the gap window: `find_account_before` returns the before-value at the
+    ///   earliest gap block, so historical query at `query_block <= history_tip` returns the
+    ///   correct historical state instead of erroring.
+    /// - Account NOT modified in the gap: gap probe misses, and the historical query falls back to
+    ///   `PlainState` (which correctly reflects the historical value because the account never
+    ///   changed since `query_block`).
+    /// - Storage same shape as account.
+    /// - Query at block strictly inside the gap (`> history_tip`) still errors.
+    #[test]
+    fn pipeline_gap_fallback_returns_historical_state() {
+        use super::PipelineGapIndex;
+        use std::sync::Arc;
+
+        let factory = create_test_provider_factory();
+        let tx = factory.provider_rw().unwrap().into_tx();
+
+        let dirty_addr = ADDRESS;
+        let clean_addr = HIGHER_ADDRESS;
+        let dirty_slot = STORAGE;
+
+        // History index covers up to block 15 for both addresses. dirty_addr is modified
+        // multiple times within and outside the indexed range; clean_addr is only modified at
+        // block 5 (well within the indexed range and before the gap).
+        tx.put::<tables::AccountsHistory>(
+            ShardedKey { key: dirty_addr, highest_block_number: 7 },
+            BlockNumberList::new([3, 7]).unwrap(),
+        )
+        .unwrap();
+        tx.put::<tables::AccountsHistory>(
+            ShardedKey { key: dirty_addr, highest_block_number: u64::MAX },
+            BlockNumberList::new([10, 15]).unwrap(),
+        )
+        .unwrap();
+        tx.put::<tables::AccountsHistory>(
+            ShardedKey { key: clean_addr, highest_block_number: u64::MAX },
+            BlockNumberList::new([5]).unwrap(),
+        )
+        .unwrap();
+        // Match the changeset entry for clean_addr at block 5 (otherwise would-be-InChangeset
+        // queries fail). For our test we only query at block 16 → InPlainState path, so the
+        // changeset itself isn't read; but keep the table consistent.
+        let acc_clean_at5 = Account { nonce: 0, balance: U256::ZERO, bytecode_hash: None };
+        tx.put::<tables::AccountChangeSets>(
+            5,
+            AccountBeforeTx { address: clean_addr, info: Some(acc_clean_at5) },
+        )
+        .unwrap();
+        // Storage history index — same shape.
+        tx.put::<tables::StoragesHistory>(
+            StorageShardedKey {
+                address: dirty_addr,
+                sharded_key: ShardedKey { key: dirty_slot, highest_block_number: u64::MAX },
+            },
+            BlockNumberList::new([10, 15]).unwrap(),
+        )
+        .unwrap();
+
+        // Existing changesets up to block 15 (covered by history index).
+        let acc_at7 = Account { nonce: 7, balance: U256::ZERO, bytecode_hash: None };
+        let acc_at10 = Account { nonce: 10, balance: U256::ZERO, bytecode_hash: None };
+        tx.put::<tables::AccountChangeSets>(
+            7,
+            AccountBeforeTx { address: dirty_addr, info: Some(acc_at7) },
+        )
+        .unwrap();
+        tx.put::<tables::AccountChangeSets>(
+            10,
+            AccountBeforeTx { address: dirty_addr, info: Some(acc_at10) },
+        )
+        .unwrap();
+
+        // Gap window changeset entries (history_tip=15, execution_tip=200, gap=[16, 200]):
+        // - account dirty_addr modified at block 50 (was acc_gap_before).
+        // - storage (dirty_addr, dirty_slot) modified at block 50 (was U256::from(42)).
+        let acc_gap_before = Account { nonce: 42, balance: U256::from(42), bytecode_hash: None };
+        tx.put::<tables::AccountChangeSets>(
+            50,
+            AccountBeforeTx { address: dirty_addr, info: Some(acc_gap_before) },
+        )
+        .unwrap();
+        let storage_before_value = U256::from(42);
+        tx.put::<tables::StorageChangeSets>(
+            (50u64, dirty_addr).into(),
+            StorageEntry { key: dirty_slot, value: storage_before_value },
+        )
+        .unwrap();
+
+        // PlainState is "future" relative to query_block — different from historical values.
+        let acc_plain = Account { nonce: 100, balance: U256::ZERO, bytecode_hash: None };
+        let clean_plain = Account { nonce: 7, balance: U256::ZERO, bytecode_hash: None };
+        tx.put::<tables::PlainAccountState>(dirty_addr, acc_plain).unwrap();
+        tx.put::<tables::PlainAccountState>(clean_addr, clean_plain).unwrap();
+        tx.put::<tables::PlainStorageState>(
+            dirty_addr,
+            StorageEntry { key: dirty_slot, value: U256::from(100) },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let db = factory.provider().unwrap();
+        let inconsistent = PipelineConsistency {
+            execution_tip: Some(200),
+            account_history_tip: Some(15),
+            storage_history_tip: Some(15),
+        };
+        let gap = Arc::new(PipelineGapIndex::build(&db, 15, 15, 200).unwrap());
+
+        // Sanity: the gap index should pick up the dirty entries and skip clean ones.
+        assert_eq!(gap.account_first_gap_block(&dirty_addr), Some(50));
+        assert!(gap.account_first_gap_block(&clean_addr).is_none());
+        assert_eq!(gap.storage_first_gap_block(&dirty_addr, &dirty_slot), Some(50));
+
+        // 1. Dirty account at block 16 → InPlainState path → gap probe hits → returns historical
+        //    value (acc_gap_before), NOT PlainState.
+        let provider = HistoricalStateProviderRef::new(&db, 16)
+            .with_pipeline_consistency(inconsistent)
+            .with_pipeline_gap_index(Some(gap.clone()));
+        let result = provider.basic_account(&dirty_addr).unwrap();
+        assert_eq!(result, Some(acc_gap_before), "Gap fallback must return before-value");
+
+        // 2. Clean account at block 16 → InPlainState path → gap miss → PlainState is correct.
+        let provider = HistoricalStateProviderRef::new(&db, 16)
+            .with_pipeline_consistency(inconsistent)
+            .with_pipeline_gap_index(Some(gap.clone()));
+        let result = provider.basic_account(&clean_addr).unwrap();
+        assert_eq!(result, Some(clean_plain), "Bloom miss → PlainState passthrough");
+
+        // 3. Dirty storage slot at block 16 → InPlainState → gap hits → returns 42, not 100.
+        let provider = HistoricalStateProviderRef::new(&db, 16)
+            .with_pipeline_consistency(inconsistent)
+            .with_pipeline_gap_index(Some(gap.clone()));
+        let result = provider.storage(dirty_addr, dirty_slot).unwrap();
+        assert_eq!(result, Some(storage_before_value), "Storage gap fallback");
+
+        // 4. Query strictly inside the gap (block 100 > history_tip 15) still errors, since the gap
+        //    index only tells us the FIRST gap block, not state at arbitrary mid-gap blocks.
+        let provider = HistoricalStateProviderRef::new(&db, 100)
+            .with_pipeline_consistency(inconsistent)
+            .with_pipeline_gap_index(Some(gap));
+        let result = provider.basic_account(&dirty_addr);
+        assert!(
+            matches!(result, Err(ProviderError::HistoryStateInconsistent { .. })),
+            "Query inside gap window must still error: {result:?}"
+        );
+
+        // 5. Without a gap index attached, behavior reverts to the strict guard (rejects).
+        let provider =
+            HistoricalStateProviderRef::new(&db, 16).with_pipeline_consistency(inconsistent);
+        let result = provider.basic_account(&dirty_addr);
+        assert!(
+            matches!(result, Err(ProviderError::HistoryStateInconsistent { .. })),
+            "Missing gap index → strict rejection: {result:?}"
+        );
+    }
+
+    /// Verifies the eager rebuild path on `ProviderFactory`:
+    /// - `refresh_pipeline_gap_index` populates the cache from current stage checkpoints.
+    /// - After refresh, `cached_tips` reflects the new `(execution_tip, history_tip)`.
+    /// - When checkpoints flip to a no-gap state, refresh clears the cache.
+    #[test]
+    fn pipeline_gap_active_rebuild_via_factory() {
+        use reth_db_api::transaction::DbTxMut;
+        use reth_stages_types::{StageCheckpoint, StageId};
+        use reth_storage_api::{StageCheckpointReader, StageCheckpointWriter};
+
+        let factory = create_test_provider_factory();
+        // Seed checkpoints + a single account/storage gap entry.
+        {
+            let provider_rw = factory.provider_rw().unwrap();
+            provider_rw
+                .save_stage_checkpoint(StageId::Execution, StageCheckpoint::new(200))
+                .unwrap();
+            provider_rw
+                .save_stage_checkpoint(StageId::IndexAccountHistory, StageCheckpoint::new(15))
+                .unwrap();
+            provider_rw
+                .save_stage_checkpoint(StageId::IndexStorageHistory, StageCheckpoint::new(15))
+                .unwrap();
+            // One account modification in the gap window so the rebuilt index is non-empty.
+            let acc = Account { nonce: 1, balance: U256::ZERO, bytecode_hash: None };
+            provider_rw
+                .tx_ref()
+                .put::<tables::AccountChangeSets>(
+                    50,
+                    AccountBeforeTx { address: ADDRESS, info: Some(acc) },
+                )
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        let cache = factory.provider().unwrap().pipeline_gap_cache().clone();
+        assert_eq!(cache.cached_tips(), None, "Cache starts empty");
+
+        // Eagerly rebuild — the trait method on the factory.
+        use reth_storage_api::DatabaseProviderFactory;
+        factory.refresh_pipeline_gap_index().unwrap();
+
+        let tips = cache.cached_tips().expect("Refresh should populate cache when gap exists");
+        assert_eq!(tips, (200, 15, 15));
+
+        // Flip to no-gap by advancing history checkpoints to match execution.
+        {
+            let provider_rw = factory.provider_rw().unwrap();
+            provider_rw
+                .save_stage_checkpoint(StageId::IndexAccountHistory, StageCheckpoint::new(200))
+                .unwrap();
+            provider_rw
+                .save_stage_checkpoint(StageId::IndexStorageHistory, StageCheckpoint::new(200))
+                .unwrap();
+            provider_rw.commit().unwrap();
+        }
+
+        // Sanity: checkpoints actually flipped before we refresh.
+        let provider_after = factory.provider().unwrap();
+        assert_eq!(
+            provider_after
+                .get_stage_checkpoint(StageId::IndexAccountHistory)
+                .unwrap()
+                .map(|c| c.block_number),
+            Some(200)
+        );
+        drop(provider_after);
+
+        factory.refresh_pipeline_gap_index().unwrap();
+        assert_eq!(cache.cached_tips(), None, "No-gap state should clear the cache");
+    }
+
+    /// Verifies the P1 fix: when account and storage history tips are different, each
+    /// dimension's gap window is keyed by ITS OWN history tip — not by `min(...)`.
+    ///
+    /// Concretely: account A is modified at block 5 (covered by `account_history_tip = 30`) and
+    /// at block 50 (in the account gap). With the old `min(account_history_tip,
+    /// storage_history_tip)` logic, the index would see block 5 as "first gap modification" and
+    /// `find_account_before` would return the pre-5 value — wrong, because state at end of
+    /// block 30 = post-5 value (A unchanged in [6, 30]).
+    ///
+    /// With per-dimension tips, the account gap correctly starts at block 31, so `first_block =
+    /// 50` and `find_account_before` returns pre-50 = correct state at end of block 30.
+    #[test]
+    fn pipeline_gap_uses_per_dimension_tips() {
+        use super::PipelineGapIndex;
+        use std::sync::Arc;
+
+        let factory = create_test_provider_factory();
+        let tx = factory.provider_rw().unwrap().into_tx();
+
+        let addr = ADDRESS;
+        // Account history covers up to block 30: shard contains only the block-5 modification.
+        tx.put::<tables::AccountsHistory>(
+            ShardedKey { key: addr, highest_block_number: u64::MAX },
+            BlockNumberList::new([5]).unwrap(),
+        )
+        .unwrap();
+
+        let pre_5 = Account { nonce: 0, balance: U256::ZERO, bytecode_hash: None };
+        let pre_50 = Account { nonce: 5, balance: U256::ZERO, bytecode_hash: None };
+        // Block 5 changeset: pre-5 value.
+        tx.put::<tables::AccountChangeSets>(
+            5,
+            AccountBeforeTx { address: addr, info: Some(pre_5) },
+        )
+        .unwrap();
+        // Block 50 changeset: pre-50 value (this is what the gap fallback should return for a
+        // query at block 31).
+        tx.put::<tables::AccountChangeSets>(
+            50,
+            AccountBeforeTx { address: addr, info: Some(pre_50) },
+        )
+        .unwrap();
+
+        let plain = Account { nonce: 100, balance: U256::ZERO, bytecode_hash: None };
+        tx.put::<tables::PlainAccountState>(addr, plain).unwrap();
+        tx.commit().unwrap();
+
+        let db = factory.provider().unwrap();
+        let inconsistent = PipelineConsistency {
+            execution_tip: Some(200),
+            // Asymmetric: account history covers more than storage. Old min-based code would
+            // collapse both gaps to (0, 200], pulling block 5 into the gap index incorrectly.
+            account_history_tip: Some(30),
+            storage_history_tip: Some(0),
+        };
+
+        // Build with the new per-dimension API.
+        let gap = Arc::new(PipelineGapIndex::build(&db, 30, 0, 200).unwrap());
+        // Account gap is (30, 200] — block 5 is OUTSIDE; block 50 is the first inside.
+        assert_eq!(
+            gap.account_first_gap_block(&addr),
+            Some(50),
+            "Account gap must use account_history_tip, not min"
+        );
+
+        // Query account A at block 31 (= account_history_tip + 1) → InPlainState path → gap
+        // probe → pre-50 value.
+        let provider = HistoricalStateProviderRef::new(&db, 31)
+            .with_pipeline_consistency(inconsistent)
+            .with_pipeline_gap_index(Some(gap));
+        let result = provider.basic_account(&addr).unwrap();
+        assert_eq!(result, Some(pre_50), "Per-dimension gap returns correct historical value");
     }
 }
