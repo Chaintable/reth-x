@@ -145,6 +145,14 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
         self
     }
 
+    /// Returns the shared pipeline gap cache. Used by the launcher to log whether the gap index
+    /// was actually populated after the startup `refresh_pipeline_gap_index` call.
+    pub fn pipeline_gap_cache(
+        &self,
+    ) -> &Arc<crate::providers::state::pipeline_gap::PipelineGapCache> {
+        &self.pipeline_gap_cache
+    }
+
     /// Returns reference to the underlying database.
     pub const fn db_ref(&self) -> &N::DB {
         &self.db

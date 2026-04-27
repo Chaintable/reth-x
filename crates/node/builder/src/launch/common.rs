@@ -711,8 +711,20 @@ where
         // shutdown left Execution ahead of the history index stages, this walks the changeset
         // tables once on startup so the first RPC historical query doesn't pay the rebuild cost.
         // The call is a no-op when the pipeline is already consistent (exec_tip <= hist_tip).
-        if let Err(err) = factory.refresh_pipeline_gap_index() {
-            warn!(target: "reth::cli", %err, "failed to prime pipeline gap index on startup");
+        let prime_started = std::time::Instant::now();
+        match factory.refresh_pipeline_gap_index() {
+            Ok(()) => {
+                let cached = factory.pipeline_gap_cache().cached_tips().is_some();
+                info!(
+                    target: "reth::cli",
+                    cached,
+                    elapsed_ms = prime_started.elapsed().as_millis() as u64,
+                    "primed pipeline gap index on startup"
+                );
+            }
+            Err(err) => {
+                warn!(target: "reth::cli", %err, "failed to prime pipeline gap index on startup");
+            }
         }
 
         Ok(factory)

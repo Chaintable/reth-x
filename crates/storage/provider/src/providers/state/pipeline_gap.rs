@@ -42,8 +42,8 @@ use reth_db_api::{
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_storage_api::{DBProvider, StorageSettingsCache};
 use reth_storage_errors::provider::ProviderResult;
-use std::sync::Arc;
-use tracing::warn;
+use std::{sync::Arc, time::Instant};
+use tracing::{debug, info, warn};
 
 /// Per-key index of the earliest modification block in each per-dimension gap window.
 #[derive(Debug)]
@@ -85,6 +85,7 @@ impl PipelineGapIndex {
             "PipelineGapIndex::build called with no gap"
         );
 
+        let started = Instant::now();
         let account_first_block: DashMap<Address, BlockNumber> = DashMap::new();
         let storage_first_block: DashMap<(Address, B256), BlockNumber> = DashMap::new();
 
@@ -123,13 +124,26 @@ impl PipelineGapIndex {
             }
         }
 
-        Ok(Self {
+        let index = Self {
             execution_tip,
             account_history_tip,
             storage_history_tip,
             account_first_block,
             storage_first_block,
-        })
+        };
+
+        info!(
+            target: "provider::pipeline_gap",
+            execution_tip,
+            account_history_tip,
+            storage_history_tip,
+            account_entries = index.account_first_block.len(),
+            storage_entries = index.storage_first_block.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "pipeline gap index built"
+        );
+
+        Ok(index)
     }
 
     /// Probe the gap for an account modification.
@@ -231,8 +245,18 @@ impl PipelineGapCache {
     {
         if account_history_tip >= execution_tip && storage_history_tip >= execution_tip {
             let mut guard = self.inner.write();
+            let was_cached = guard.index.is_some();
             guard.tips = None;
             guard.index = None;
+            if was_cached {
+                debug!(
+                    target: "provider::pipeline_gap",
+                    execution_tip,
+                    account_history_tip,
+                    storage_history_tip,
+                    "history index caught up — pipeline gap cache cleared"
+                );
+            }
             return Ok(());
         }
         let idx = Arc::new(PipelineGapIndex::build(
