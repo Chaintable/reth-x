@@ -1,9 +1,9 @@
-name: "Release new ext"
+name: "Build new ext"
 
 on:
-  release:
-        types:
-          - created
+  pull_request:
+    branches:
+      - 'debank'
   workflow_dispatch:
 
 env:
@@ -13,7 +13,7 @@ env:
   DOCKERFILE: Dockerfile
   OP_DOCKERFILE: DockerfileOp
   AWS_REGION: ap-northeast-1
-
+  
 jobs:
   build-artifacts:
     strategy:
@@ -28,7 +28,7 @@ jobs:
 
       - name: Set env
         run: |
-          echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "REVISION=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -58,7 +58,7 @@ jobs:
 
       - name: Set env
         run: |
-          echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "REVISION=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -74,3 +74,4 @@ jobs:
           git submodule update --init --recursive
           docker build -t ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION} -f ${OP_DOCKERFILE} .
           docker push ${REGISTRY}/${OP_IMAGE}:${{ matrix.arch }}-${REVISION}
+          
