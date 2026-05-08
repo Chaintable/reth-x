@@ -21,7 +21,7 @@ use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_rpc_api::TraceApiServer;
-use reth_rpc_convert::{RpcConvert, RpcTxReq};
+use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{
         block::EthBlocks, Call, LoadPendingBlock, LoadReceipt, LoadTransaction, Trace, TraceExt,
@@ -709,9 +709,7 @@ where
         for index in 0..block.body().transactions().len() {
             let tx = &block.body().transactions()[index];
             let receipt = &receipts[index];
-            let deposit_nonce: Option<u64> = self.eth_api().converter().get_deposit_nonce(receipt);
-            let l1_fee: Option<u128> = self.eth_api().converter().get_l1_fee(receipt);
-            let debank_tx: DebankTransaction = (receipt, tx, deposit_nonce, l1_fee).into();
+            let debank_tx: DebankTransaction = (receipt, tx).into();
             debank_txs.push(debank_tx);
         }
 

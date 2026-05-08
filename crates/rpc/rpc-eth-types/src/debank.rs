@@ -7,7 +7,6 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
 use revm::{database::BundleState, interpreter::InstructionResult, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
@@ -265,35 +264,24 @@ pub struct DebankTransaction {
     pub value: U256,
 }
 
-
-impl<R, T> From<(&R, &T, Option<u64>, Option<u128>)> for DebankTransaction
+impl<R, T> From<(&R, &T)> for DebankTransaction
 where
     R: ReceiptResponse,
     T: Transaction,
 {
-    fn from((receipt, tx, deposit_nonce, l1_fee): (&R, &T, Option<u64>, Option<u128>)) -> Self {
-        let gas_price = match l1_fee {
-            None =>  U256::from(receipt.effective_gas_price()),
-            Some(l1_fee) => {
-                let effective_gas_price = U256::from(receipt.effective_gas_price());
-                let gas_used = U256::from(receipt.gas_used());
-                let l1_fee = U256::from(l1_fee);
-                let gas_price = (l1_fee / gas_used) + effective_gas_price;
-                gas_price
-            }
-        };
+    fn from((receipt, tx): (&R, &T)) -> Self {
         Self {
             id: receipt.transaction_hash().to_string(),
             from: receipt.from(),
             to: receipt.to().unwrap_or_default(),
             gas_limit: tx.gas_limit(),
-            gas_price: gas_price.to(),
+            gas_price: receipt.effective_gas_price(),
             gas_used: receipt.gas_used(),
             status: receipt.status(),
             gas_fee_cap: tx.max_fee_per_gas(),
             gas_tip_cap: tx.max_priority_fee_per_gas().unwrap_or_default(),
             input: tx.input().clone(),
-            nonce: if tx.nonce() == 0 { deposit_nonce.unwrap_or(0) } else { tx.nonce() },
+            nonce: tx.nonce(),
             transaction_index: receipt.transaction_index().unwrap_or(0),
             value: tx.value(),
         }
@@ -421,12 +409,12 @@ pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
     }
     let msg = match res {
         InstructionResult::Revert => "Reverted".to_string(),
-        InstructionResult::OutOfGas
-        | InstructionResult::PrecompileOOG
-        | InstructionResult::MemoryOOG
-        | InstructionResult::MemoryLimitOOG
-        | InstructionResult::InvalidOperandOOG
-        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfGas |
+        InstructionResult::PrecompileOOG |
+        InstructionResult::MemoryOOG |
+        InstructionResult::MemoryLimitOOG |
+        InstructionResult::InvalidOperandOOG |
+        InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
         InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
         InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
             "Bad instruction".to_string()
@@ -443,11 +431,11 @@ impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
         let call_create_type = match trace.kind {
-            CallKind::Call
-            | CallKind::StaticCall
-            | CallKind::CallCode
-            | CallKind::DelegateCall
-            | CallKind::AuthCall => "call".to_string(),
+            CallKind::Call |
+            CallKind::StaticCall |
+            CallKind::CallCode |
+            CallKind::DelegateCall |
+            CallKind::AuthCall => "call".to_string(),
             CallKind::Create => "create".to_string(),
             CallKind::Create2 => "create2".to_string(),
         };
@@ -822,7 +810,7 @@ pub fn build_genesis_txs_and_traces(
 mod tests {
     use super::*;
     use alloy_primitives::map::AddressMap;
-    use reth_revm::db::DbAccount;
+    use reth_revm::db::{AccountState, Cache, DbAccount};
     use revm::{
         database::{
             states::{plain_account::StorageSlot, AccountStatus, BundleAccount},
@@ -831,7 +819,6 @@ mod tests {
         state::{AccountInfo, Bytecode},
     };
     use std::collections::BTreeMap;
-
 
     pub fn get_storage_contracts_from_cache(cache: &Cache) -> Vec<Address> {
         let mut addresses = Vec::new();
@@ -843,7 +830,10 @@ mod tests {
         addresses
     }
 
-    pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -> BlockStorageDiff {
+    pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(
+        cache: Cache,
+        pre_db: DB,
+    ) -> BlockStorageDiff {
         let mut new_accounts = Vec::new();
         let mut deleted_accounts = Vec::new();
         let mut storage_diffs = Vec::new();
@@ -933,11 +923,7 @@ mod tests {
                 storage.iter().map(|(k, v)| (*k, *v)).collect();
             self.cache.accounts.insert(
                 address,
-                DbAccount {
-                    info: account_info.clone(),
-                    account_state,
-                    storage: storage_map,
-                },
+                DbAccount { info: account_info.clone(), account_state, storage: storage_map },
             );
 
             let bundle_storage: alloy_primitives::map::HashMap<_, _, _> = storage
