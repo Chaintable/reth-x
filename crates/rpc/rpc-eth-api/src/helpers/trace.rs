@@ -1,27 +1,27 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
-use crate::FromEvmError;
+use crate::{FromEthApiError, FromEvmError};
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_chainspec::ChainSpecProvider;
-use reth_errors::ProviderError;
+use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    evm::EvmFactoryExt, system_calls::SystemCaller, tracing::TracingCtx, ConfigureEvm, Database,
-    Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
+    block::BlockExecutor, evm::EvmFactoryExt, tracing::TracingCtx, ConfigureEvm, Database, Evm,
+    EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
-use reth_revm::{database::StateProviderDatabase, db::State};
-use reth_rpc_eth_types::{
-    cache::db::{StateCacheDb, StateDiffTraceDB},
-    get_storage_contracts_from_cache, get_storage_diffs_from_cache, BlockStorageDiff, EthApiError,
+use reth_revm::{
+    database::StateProviderDatabase,
+    db::{bal::EvmDatabaseError, State},
 };
+use reth_rpc_eth_types::cache::db::StateCacheDb;
 use reth_storage_api::{ProviderBlock, ProviderTx};
-use revm::{context::Block, context_interface::result::ResultAndState, DatabaseCommit};
+use revm::{context::Block, context_interface::result::ResultAndState};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
+use reth_rpc_eth_types::{get_storage_contracts_from_bundle, get_storage_diffs_from_bundle, BlockStorageDiff, EthApiError};
 
 /// Executes CPU heavy tasks.
 pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
@@ -35,7 +35,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         inspector: I,
     ) -> Result<ResultAndState<HaltReasonFor<Self::Evm>>, Self::Error>
     where
-        DB: Database<Error = ProviderError>,
+        DB: Database<Error = EvmDatabaseError<ProviderError>>,
         I: InspectorFor<Self::Evm, DB>,
     {
         let mut evm = self.evm_config().evm_with_env_and_inspector(db, evm_env, inspector);
@@ -171,7 +171,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             };
             let (tx, tx_info) = transaction.split();
 
-            let (evm_env, _) = self.evm_env_at(block.hash().into()).await?;
+            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             // we need to get the state of the parent block because we're essentially replaying the
             // block the transaction is included in
@@ -180,7 +180,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             self.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
-                this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+                this.apply_pre_execution_changes(&block, &mut db)?;
 
                 // replay all transactions prior to the targeted transaction
                 this.replay_transactions_until(&mut db, evm_env.clone(), block_txs, *tx.tx_hash())?;
@@ -266,16 +266,11 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
-            let block = async {
-                if block.is_some() {
-                    return Ok(block)
-                }
-                self.recovered_block(block_id).await
-            };
-
-            let ((evm_env, _), block) = futures::try_join!(self.evm_env_at(block_id), block)?;
+            let block =
+                if block.is_some() { block } else { self.recovered_block(block_id).await? };
 
             let Some(block) = block else { return Ok(None) };
+            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             if block.body().transactions().is_empty() {
                 // nothing to trace
@@ -289,9 +284,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let block_hash = block.hash();
 
                 let block_number = evm_env.block_env.number().saturating_to();
+                let block_timestamp = evm_env.block_env.timestamp().saturating_to();
                 let base_fee = evm_env.block_env.basefee();
 
-                this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+                this.apply_pre_execution_changes(&block, &mut db)?;
 
                 // prepare transactions, we do everything upfront to reduce time spent with open
                 // state
@@ -315,6 +311,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                             index: Some(idx),
                             block_hash: Some(block_hash),
                             block_number: Some(block_number),
+                            block_timestamp: Some(block_timestamp),
                             base_fee: Some(base_fee),
                         };
                         idx += 1;
@@ -410,22 +407,19 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
     /// Applies chain-specific state transitions required before executing a block.
     ///
     /// Note: This should only be called when tracing an entire block vs individual transactions.
-    /// When tracing transaction on top of an already committed block state, those transitions are
+    /// When tracing transactions on top of an already committed block state, those transitions are
     /// already applied.
-    fn apply_pre_execution_changes<DB: Send + Database + DatabaseCommit>(
+    fn apply_pre_execution_changes(
         &self,
         block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
-        db: &mut DB,
-        evm_env: &EvmEnvFor<Self::Evm>,
+        db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
-        let mut system_caller = SystemCaller::new(self.provider().chain_spec());
-
-        // apply relevant system calls
-        let mut evm = self.evm_config().evm_with_env(db, evm_env.clone());
-        system_caller.apply_pre_execution_changes(block.header(), &mut evm).map_err(|err| {
-            EthApiError::EvmCustom(format!("failed to apply 4788 system call {err}"))
-        })?;
-
+        self.evm_config()
+            .executor_for_block(db, block.sealed_block())
+            .map_err(RethError::other)
+            .map_err(Self::Error::from_eth_err)?
+            .apply_pre_execution_changes()
+            .map_err(Self::Error::from_eth_err)?;
         Ok(())
     }
 
@@ -443,13 +437,13 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 TracingCtx<
                     '_,
                     Recovered<&ProviderTx<Self::Provider>>,
-                    EvmFor<Self::Evm, &mut StateDiffTraceDB<StateCacheDb>, Insp>,
+                    EvmFor<Self::Evm, &mut StateCacheDb, Insp>,
                 >,
             ) -> Result<R, Self::Error>
             + Send
             + 'static,
         Setup: FnMut() -> Insp + Send + 'static,
-        Insp: Clone + for<'a> InspectorFor<Self::Evm, &'a mut StateDiffTraceDB<StateCacheDb>>,
+        Insp: Clone + for<'a> InspectorFor<Self::Evm, &'a mut StateCacheDb>,
         R: Send + 'static,
     {
         async move {
@@ -465,33 +459,29 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 
             let parent_hash = block.parent_hash();
 
-            // replay all transactions of the block
             self.spawn_blocking_io_fut(move |this| async move {
                 let block_hash = block.hash();
 
                 let block_number = evm_env.block_env.number().saturating_to();
                 let base_fee = evm_env.block_env.basefee();
 
-                // Get states for pre_db and diff db
-                let state1 = this.state_at_block_id(parent_hash.into()).await?;
-                let state2 = this.state_at_block_id(parent_hash.into()).await?;
+                let pre_state = this.state_at_block_id(parent_hash.into()).await?;
+                let exec_state = this.state_at_block_id(parent_hash.into()).await?;
 
-                // Create a State db for pre_db (to compare diffs later)
                 let pre_db: StateCacheDb = State::builder()
                     .with_database(StateProviderDatabase::new(
-                        reth_rpc_eth_types::cache::db::StateProviderTraitObjWrapper(state1),
+                        reth_rpc_eth_types::cache::db::StateProviderTraitObjWrapper(pre_state),
                     ))
                     .build();
 
-                // Create StateDiffTraceDB with another State db
-                let cache_db: StateCacheDb = State::builder()
+                let mut db: StateCacheDb = State::builder()
                     .with_database(StateProviderDatabase::new(
-                        reth_rpc_eth_types::cache::db::StateProviderTraitObjWrapper(state2),
+                        reth_rpc_eth_types::cache::db::StateProviderTraitObjWrapper(exec_state),
                     ))
+                    .with_bundle_update()
                     .build();
-                let mut db = StateDiffTraceDB::new(cache_db);
 
-                this.apply_pre_execution_changes(&block, &mut db, &evm_env)?;
+                this.apply_pre_execution_changes(&block, &mut db)?;
 
                 let mut idx = 0;
 
@@ -506,6 +496,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                             block_hash: Some(block_hash),
                             block_number: Some(block_number),
                             base_fee: Some(base_fee),
+                            block_timestamp: Some(block.timestamp()),
                         };
                         idx += 1;
 
@@ -513,8 +504,14 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     })
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
-                let change_addresses = get_storage_contracts_from_cache(&db.diff.cache);
-                Ok((results, get_storage_diffs_from_cache(db.diff.cache, pre_db), change_addresses))
+
+                db.merge_transitions(
+                    revm::database::states::bundle_state::BundleRetention::PlainState,
+                );
+                let bundle = db.take_bundle();
+                let change_addresses = get_storage_contracts_from_bundle(&bundle);
+                let storage_diff = get_storage_diffs_from_bundle(bundle, pre_db);
+                Ok((results, storage_diff, change_addresses))
             })
             .await
         }

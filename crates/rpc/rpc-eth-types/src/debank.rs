@@ -7,9 +7,8 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
-use revm::{interpreter::InstructionResult, DatabaseRef};
+use revm::{database::BundleState, interpreter::InstructionResult, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::{
     types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder},
@@ -45,45 +44,43 @@ pub fn get_storage_contracts_from_genesis(genesis: &Genesis) -> Vec<Address> {
     addresses
 }
 
-pub fn get_storage_contracts_from_cache(cache: &Cache) -> Vec<Address> {
-    let mut addresses = Vec::new();
-    for (address, account) in cache.accounts.iter() {
-        if account.storage.len() > 0 {
-            addresses.push(*address);
-        }
-    }
-    addresses
+pub fn get_storage_contracts_from_bundle(bundle: &BundleState) -> Vec<Address> {
+    bundle
+        .state
+        .iter()
+        .filter_map(|(address, account)| (!account.storage.is_empty()).then_some(*address))
+        .collect()
 }
 
-pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -> BlockStorageDiff {
+pub fn get_storage_diffs_from_bundle<DB: DatabaseRef>(
+    bundle: BundleState,
+    pre_db: DB,
+) -> BlockStorageDiff {
     let mut new_accounts = Vec::new();
     let mut deleted_accounts = Vec::new();
     let mut storage_diffs = Vec::new();
     let mut new_codes = Vec::new();
 
-    // Process accounts
-    for (address, db_account) in cache.accounts {
-        // Check if account is deleted (non-existing)
-        if db_account.account_state == AccountState::NotExisting {
+    for (address, account) in bundle.state {
+        let Some(info) = account.info else {
             deleted_accounts.push(keccak256(address.0));
             continue;
-        }
+        };
 
         new_accounts.push(NewAccount {
             address: keccak256(address.0),
-            balance: db_account.info.balance,
-            nonce: db_account.info.nonce,
-            code_hash: db_account.info.code_hash,
+            balance: info.balance,
+            nonce: info.nonce,
+            code_hash: info.code_hash,
         });
 
-        // Collect storage changes
-        if !db_account.storage.is_empty() {
-            let diffs: Vec<IndexValuePair> = db_account
+        if !account.storage.is_empty() {
+            let diffs: Vec<IndexValuePair> = account
                 .storage
                 .into_iter()
-                .map(|(key, value)| IndexValuePair {
+                .map(|(key, slot)| IndexValuePair {
                     index: keccak256::<[u8; 32]>(key.to_be_bytes()),
-                    value,
+                    value: slot.present_value,
                 })
                 .collect();
 
@@ -92,11 +89,11 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
             }
         }
 
-        if let Some(code) = db_account.info.code {
-            let code_hash = db_account.info.code_hash;
-            if let Ok(Some(account)) = pre_db.basic_ref(address) {
-                if account.code_hash == code_hash {
-                    continue; // Code already exists in the previous state
+        if let Some(code) = info.code {
+            let code_hash = info.code_hash;
+            if let Ok(Some(prev)) = pre_db.basic_ref(address) {
+                if prev.code_hash == code_hash {
+                    continue;
                 }
             }
             new_codes.push(NewCode { code_hash, code: code.original_bytes() });
@@ -104,8 +101,8 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
     }
 
     BlockStorageDiff {
-        hash: H256::ZERO,        // These will need to be set by the caller
-        parent_hash: H256::ZERO, // These will need to be set by the caller
+        hash: H256::ZERO,
+        parent_hash: H256::ZERO,
         new_accounts,
         deleted_accounts,
         storage_diffs,
@@ -267,35 +264,24 @@ pub struct DebankTransaction {
     pub value: U256,
 }
 
-
-impl<R, T> From<(&R, &T, Option<u64>, Option<u128>)> for DebankTransaction
+impl<R, T> From<(&R, &T)> for DebankTransaction
 where
     R: ReceiptResponse,
     T: Transaction,
 {
-    fn from((receipt, tx, deposit_nonce, l1_fee): (&R, &T, Option<u64>, Option<u128>)) -> Self {
-        let gas_price = match l1_fee {
-            None =>  U256::from(receipt.effective_gas_price()),
-            Some(l1_fee) => {
-                let effective_gas_price = U256::from(receipt.effective_gas_price());
-                let gas_used = U256::from(receipt.gas_used());
-                let l1_fee = U256::from(l1_fee);
-                let gas_price = (l1_fee / gas_used) + effective_gas_price;
-                gas_price
-            }
-        };
+    fn from((receipt, tx): (&R, &T)) -> Self {
         Self {
             id: receipt.transaction_hash().to_string(),
             from: receipt.from(),
             to: receipt.to().unwrap_or_default(),
             gas_limit: tx.gas_limit(),
-            gas_price: gas_price.to(),
+            gas_price: receipt.effective_gas_price(),
             gas_used: receipt.gas_used(),
             status: receipt.status(),
             gas_fee_cap: tx.max_fee_per_gas(),
             gas_tip_cap: tx.max_priority_fee_per_gas().unwrap_or_default(),
             input: tx.input().clone(),
-            nonce: if tx.nonce() == 0 { deposit_nonce.unwrap_or(0) } else { tx.nonce() },
+            nonce: tx.nonce(),
             transaction_index: receipt.transaction_index().unwrap_or(0),
             value: tx.value(),
         }
@@ -423,12 +409,12 @@ pub(crate) fn fmt_error_msg(res: InstructionResult) -> Option<String> {
     }
     let msg = match res {
         InstructionResult::Revert => "Reverted".to_string(),
-        InstructionResult::OutOfGas
-        | InstructionResult::PrecompileOOG
-        | InstructionResult::MemoryOOG
-        | InstructionResult::MemoryLimitOOG
-        | InstructionResult::InvalidOperandOOG
-        | InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
+        InstructionResult::OutOfGas |
+        InstructionResult::PrecompileOOG |
+        InstructionResult::MemoryOOG |
+        InstructionResult::MemoryLimitOOG |
+        InstructionResult::InvalidOperandOOG |
+        InstructionResult::ReentrancySentryOOG => "Out of gas".to_string(),
         InstructionResult::OutOfFunds => "Insufficient balance for transfer".to_string(),
         InstructionResult::OpcodeNotFound | InstructionResult::InvalidFEOpcode => {
             "Bad instruction".to_string()
@@ -445,11 +431,11 @@ impl From<&CallTraceNode> for DebankTrace {
     fn from(call_trace: &CallTraceNode) -> Self {
         let trace = &call_trace.trace;
         let call_create_type = match trace.kind {
-            CallKind::Call
-            | CallKind::StaticCall
-            | CallKind::CallCode
-            | CallKind::DelegateCall
-            | CallKind::AuthCall => "call".to_string(),
+            CallKind::Call |
+            CallKind::StaticCall |
+            CallKind::CallCode |
+            CallKind::DelegateCall |
+            CallKind::AuthCall => "call".to_string(),
             CallKind::Create => "create".to_string(),
             CallKind::Create2 => "create2".to_string(),
         };
@@ -818,4 +804,296 @@ pub fn build_genesis_txs_and_traces(
     traces.push(native_token_trace);
 
     (txs, traces)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::map::AddressMap;
+    use reth_revm::db::{AccountState, Cache, DbAccount};
+    use revm::{
+        database::{
+            states::{plain_account::StorageSlot, AccountStatus, BundleAccount},
+            EmptyDB,
+        },
+        state::{AccountInfo, Bytecode},
+    };
+    use std::collections::BTreeMap;
+
+    pub fn get_storage_contracts_from_cache(cache: &Cache) -> Vec<Address> {
+        let mut addresses = Vec::new();
+        for (address, account) in cache.accounts.iter() {
+            if account.storage.len() > 0 {
+                addresses.push(*address);
+            }
+        }
+        addresses
+    }
+
+    pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(
+        cache: Cache,
+        pre_db: DB,
+    ) -> BlockStorageDiff {
+        let mut new_accounts = Vec::new();
+        let mut deleted_accounts = Vec::new();
+        let mut storage_diffs = Vec::new();
+        let mut new_codes = Vec::new();
+
+        // Process accounts
+        for (address, db_account) in cache.accounts {
+            // Check if account is deleted (non-existing)
+            if db_account.account_state == AccountState::NotExisting {
+                deleted_accounts.push(keccak256(address.0));
+                continue;
+            }
+
+            new_accounts.push(NewAccount {
+                address: keccak256(address.0),
+                balance: db_account.info.balance,
+                nonce: db_account.info.nonce,
+                code_hash: db_account.info.code_hash,
+            });
+
+            // Collect storage changes
+            if !db_account.storage.is_empty() {
+                let diffs: Vec<IndexValuePair> = db_account
+                    .storage
+                    .into_iter()
+                    .map(|(key, value)| IndexValuePair {
+                        index: keccak256::<[u8; 32]>(key.to_be_bytes()),
+                        value,
+                    })
+                    .collect();
+
+                if !diffs.is_empty() {
+                    storage_diffs.push(AccountStorageDiff { address: keccak256(address.0), diffs });
+                }
+            }
+
+            if let Some(code) = db_account.info.code {
+                let code_hash = db_account.info.code_hash;
+                if let Ok(Some(account)) = pre_db.basic_ref(address) {
+                    if account.code_hash == code_hash {
+                        continue; // Code already exists in the previous state
+                    }
+                }
+                new_codes.push(NewCode { code_hash, code: code.original_bytes() });
+            }
+        }
+
+        BlockStorageDiff {
+            hash: H256::ZERO,        // These will need to be set by the caller
+            parent_hash: H256::ZERO, // These will need to be set by the caller
+            new_accounts,
+            deleted_accounts,
+            storage_diffs,
+            new_codes,
+        }
+    }
+
+    fn addr(byte: u8) -> Address {
+        Address::repeat_byte(byte)
+    }
+
+    fn slot(value: u64) -> U256 {
+        U256::from(value)
+    }
+
+    fn info(balance: u64, nonce: u64, code: Option<Bytecode>) -> AccountInfo {
+        let code_hash = code.as_ref().map(|c| c.hash_slow()).unwrap_or(KECCAK_EMPTY);
+        AccountInfo { balance: U256::from(balance), nonce, code_hash, code, account_id: None }
+    }
+
+    #[derive(Default)]
+    struct Fixture {
+        cache: Cache,
+        bundle_state: AddressMap<BundleAccount>,
+    }
+
+    impl Fixture {
+        fn add_account(
+            &mut self,
+            address: Address,
+            account_state: AccountState,
+            account_info: AccountInfo,
+            storage: BTreeMap<U256, U256>,
+            status: AccountStatus,
+        ) {
+            let storage_map: alloy_primitives::map::HashMap<_, _, _> =
+                storage.iter().map(|(k, v)| (*k, *v)).collect();
+            self.cache.accounts.insert(
+                address,
+                DbAccount { info: account_info.clone(), account_state, storage: storage_map },
+            );
+
+            let bundle_storage: alloy_primitives::map::HashMap<_, _, _> = storage
+                .into_iter()
+                .map(|(k, v)| (k, StorageSlot::new_changed(U256::ZERO, v)))
+                .collect();
+            self.bundle_state.insert(
+                address,
+                BundleAccount::new(None, Some(account_info), bundle_storage, status),
+            );
+        }
+
+        fn add_deleted(&mut self, address: Address, original: AccountInfo) {
+            self.cache.accounts.insert(address, DbAccount::new_not_existing());
+            self.bundle_state.insert(
+                address,
+                BundleAccount::new(
+                    Some(original),
+                    None,
+                    Default::default(),
+                    AccountStatus::Destroyed,
+                ),
+            );
+        }
+
+        fn build(self) -> (Cache, BundleState) {
+            let mut bundle = BundleState::default();
+            bundle.state = self.bundle_state;
+            (self.cache, bundle)
+        }
+    }
+
+    fn sort_diff(d: &mut BlockStorageDiff) {
+        d.new_accounts.sort_by_key(|a| a.address);
+        d.deleted_accounts.sort();
+        for s in &mut d.storage_diffs {
+            s.diffs.sort_by_key(|p| p.index);
+        }
+        d.storage_diffs.sort_by_key(|s| s.address);
+        d.new_codes.sort_by_key(|c| c.code_hash);
+    }
+
+    fn assert_equivalent(cache: Cache, bundle: BundleState) {
+        let pre_db = EmptyDB::default();
+        let mut from_cache = get_storage_diffs_from_cache(cache, &pre_db);
+        let mut from_bundle = get_storage_diffs_from_bundle(bundle, &pre_db);
+        sort_diff(&mut from_cache);
+        sort_diff(&mut from_bundle);
+        assert_eq!(from_cache, from_bundle);
+    }
+
+    #[test]
+    fn equivalence_new_account_with_balance() {
+        let mut f = Fixture::default();
+        f.add_account(
+            addr(1),
+            AccountState::Touched,
+            info(1_000, 0, None),
+            BTreeMap::new(),
+            AccountStatus::InMemoryChange,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_deleted_account() {
+        let mut f = Fixture::default();
+        f.add_deleted(addr(2), info(500, 1, None));
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_storage_modification() {
+        let mut f = Fixture::default();
+        let mut storage = BTreeMap::new();
+        storage.insert(slot(0), U256::from(42));
+        storage.insert(slot(1), U256::from(99));
+        f.add_account(
+            addr(3),
+            AccountState::Touched,
+            info(0, 5, None),
+            storage,
+            AccountStatus::Changed,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_new_contract_deployment() {
+        let mut f = Fixture::default();
+        let code = Bytecode::new_raw(vec![0x60, 0x00, 0x60, 0x00].into());
+        let mut storage = BTreeMap::new();
+        storage.insert(slot(0), U256::from(1));
+        f.add_account(
+            addr(4),
+            AccountState::Touched,
+            info(0, 1, Some(code)),
+            storage,
+            AccountStatus::InMemoryChange,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_existing_contract_storage_change() {
+        let mut f = Fixture::default();
+        let mut storage = BTreeMap::new();
+        storage.insert(slot(7), U256::from(123));
+        f.add_account(
+            addr(5),
+            AccountState::Touched,
+            info(100, 10, None),
+            storage,
+            AccountStatus::Changed,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_system_call_storage_only_write() {
+        let mut f = Fixture::default();
+        let mut storage = BTreeMap::new();
+        storage.insert(slot(0), U256::from(0xdeadbeefu64));
+        f.add_account(
+            addr(6),
+            AccountState::Touched,
+            info(0, 0, None),
+            storage,
+            AccountStatus::InMemoryChange,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
+
+    #[test]
+    fn equivalence_combined_scenario() {
+        let mut f = Fixture::default();
+        f.add_account(
+            addr(1),
+            AccountState::Touched,
+            info(1_000, 0, None),
+            BTreeMap::new(),
+            AccountStatus::InMemoryChange,
+        );
+        f.add_deleted(addr(2), info(500, 1, None));
+        let mut storage3 = BTreeMap::new();
+        storage3.insert(slot(0), U256::from(42));
+        f.add_account(
+            addr(3),
+            AccountState::Touched,
+            info(0, 5, None),
+            storage3,
+            AccountStatus::Changed,
+        );
+        let code = Bytecode::new_raw(vec![0x60, 0x00].into());
+        let mut storage4 = BTreeMap::new();
+        storage4.insert(slot(0), U256::from(1));
+        f.add_account(
+            addr(4),
+            AccountState::Touched,
+            info(0, 1, Some(code)),
+            storage4,
+            AccountStatus::InMemoryChange,
+        );
+        let (cache, bundle) = f.build();
+        assert_equivalent(cache, bundle);
+    }
 }

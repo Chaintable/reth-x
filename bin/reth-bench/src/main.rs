@@ -14,6 +14,9 @@
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
+#[cfg(all(feature = "jemalloc", unix))]
+use reth_cli_util::allocator::tikv_jemalloc_sys as _;
+
 pub mod authenticated_transport;
 pub mod bench;
 pub mod bench_mode;
@@ -23,7 +26,7 @@ use bench::BenchmarkCommand;
 use clap::Parser;
 use reth_cli_runner::CliRunner;
 
-fn main() {
+fn main() -> eyre::Result<()> {
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {
@@ -31,12 +34,11 @@ fn main() {
         }
     }
 
+    color_eyre::install()?;
+
     // Run until either exit or sigint or sigterm
-    let runner = CliRunner::try_default_runtime().unwrap();
-    runner
-        .run_command_until_exit(|ctx| {
-            let command = BenchmarkCommand::parse();
-            command.execute(ctx)
-        })
-        .unwrap();
+    let runner = CliRunner::try_default_runtime()?;
+    runner.run_command_until_exit(|ctx| BenchmarkCommand::parse().execute(ctx))?;
+
+    Ok(())
 }

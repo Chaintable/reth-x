@@ -66,6 +66,7 @@ std = [
     "reth-evm-ethereum?/std",
     "reth-revm?/std",
     "alloy-rpc-types-engine?/std",
+    "reth-codecs?/std",
 ]
 arbitrary = [
     "std",
@@ -81,6 +82,7 @@ arbitrary = [
 ]
 keccak-cache-global = [
     "reth-node-ethereum?/keccak-cache-global",
+    "reth-node-core?/keccak-cache-global",
 ]
 test-utils = [
     "reth-chainspec/test-utils",
@@ -99,6 +101,7 @@ test-utils = [
     "reth-node-builder?/test-utils",
     "reth-trie-db?/test-utils",
     "reth-codecs?/test-utils",
+    "reth-tasks?/test-utils",
 ]
 
 full = [
@@ -150,6 +153,16 @@ jemalloc = [
     "reth-cli-util?/jemalloc",
     "reth-ethereum-cli?/jemalloc",
     "reth-node-core?/jemalloc",
+    "reth-provider?/jemalloc",
+]
+jemalloc-prof = [
+    "jemalloc",
+    "reth-cli-util?/jemalloc-prof",
+    "reth-ethereum-cli?/jemalloc-prof",
+]
+jemalloc-symbols = [
+    "jemalloc-prof",
+    "reth-ethereum-cli?/jemalloc-symbols",
 ]
 js-tracer = [
     "rpc",

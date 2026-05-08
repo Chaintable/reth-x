@@ -7,12 +7,7 @@ use reth_errors::ProviderResult;
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider, StateProviderBox};
 use reth_trie::{HashedStorage, MultiProofTargets};
-use revm::{
-    database::{BundleState, InMemoryDB, State},
-    primitives::HashMap,
-    state::{AccountInfo, Bytecode},
-    Database, DatabaseCommit, DatabaseRef,
-};
+use revm::database::{BundleState, State};
 
 /// Helper alias type for the state's [`State`]
 pub type StateCacheDb = State<StateProviderDatabase<StateProviderTraitObjWrapper>>;
@@ -106,8 +101,9 @@ impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
         &self,
         input: reth_trie::TrieInput,
         target: reth_trie::HashedPostState,
+        mode: reth_trie::ExecutionWitnessMode,
     ) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>> {
-        self.0.witness(input, target)
+        self.0.witness(input, target, mode)
     }
 }
 
@@ -181,69 +177,5 @@ impl BytecodeReader for StateProviderTraitObjWrapper {
         code_hash: &B256,
     ) -> reth_errors::ProviderResult<Option<reth_primitives_traits::Bytecode>> {
         self.0.bytecode_by_hash(code_hash)
-    }
-}
-
-/// A database that wraps an external database and an in-memory diff database.
-#[derive(Debug, Clone)]
-pub struct StateDiffTraceDB<ExtDB> {
-    /// The diff that stores all state changes.
-    pub diff: InMemoryDB,
-    /// The underlying database ([DatabaseRef]) that is used to load data.
-    ///
-    /// Note: This is read-only, data is never written to this database.
-    pub db: ExtDB,
-}
-
-impl<ExtDB> StateDiffTraceDB<ExtDB> {
-    /// Creates a new cache with the given external database.
-    pub fn new(db: ExtDB) -> Self {
-        Self { diff: InMemoryDB::default(), db }
-    }
-}
-
-impl<ExtDB: Database> Database for StateDiffTraceDB<ExtDB> {
-    type Error = ExtDB::Error;
-    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.db.basic(address)
-    }
-
-    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.db.code_by_hash(code_hash)
-    }
-
-    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.db.storage(address, index)
-    }
-
-    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        self.db.block_hash(number)
-    }
-}
-
-impl<ExtDB: DatabaseRef> DatabaseRef for StateDiffTraceDB<ExtDB> {
-    type Error = ExtDB::Error;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.db.basic_ref(address)
-    }
-
-    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.db.code_by_hash_ref(code_hash)
-    }
-
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.db.storage_ref(address, index)
-    }
-
-    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
-        self.db.block_hash_ref(number)
-    }
-}
-
-impl<ExtDB: DatabaseCommit> DatabaseCommit for StateDiffTraceDB<ExtDB> {
-    fn commit(&mut self, changes: HashMap<Address, revm::state::Account>) {
-        self.diff.commit(changes.clone());
-        self.db.commit(changes);
     }
 }

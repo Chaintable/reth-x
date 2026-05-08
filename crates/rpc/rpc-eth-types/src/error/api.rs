@@ -5,6 +5,7 @@ use crate::{simulate::EthSimulateError, EthApiError, RevertError};
 use alloy_primitives::Bytes;
 use reth_errors::ProviderError;
 use reth_evm::{ConfigureEvm, EvmErrorFor, HaltReasonFor};
+use reth_revm::db::bal::EvmDatabaseError;
 use revm::{context::result::ExecutionResult, context_interface::result::HaltReason};
 
 use super::RpcInvalidTransactionError;
@@ -51,7 +52,7 @@ where
 
 /// Helper trait to access wrapped core error.
 pub trait AsEthApiError {
-    /// Returns reference to [`EthApiError`], if this an error variant inherited from core
+    /// Returns a reference to [`EthApiError`] if this is an error variant inherited from core
     /// functionality.
     fn as_err(&self) -> Option<&EthApiError>;
 
@@ -110,10 +111,12 @@ impl AsEthApiError for EthApiError {
 
 /// Helper trait to convert from revm errors.
 pub trait FromEvmError<Evm: ConfigureEvm>:
-    From<EvmErrorFor<Evm, ProviderError>> + FromEvmHalt<HaltReasonFor<Evm>> + FromRevert
+    From<EvmErrorFor<Evm, EvmDatabaseError<ProviderError>>>
+    + FromEvmHalt<HaltReasonFor<Evm>>
+    + FromRevert
 {
     /// Converts from EVM error to this type.
-    fn from_evm_err(err: EvmErrorFor<Evm, ProviderError>) -> Self {
+    fn from_evm_err(err: EvmErrorFor<Evm, EvmDatabaseError<ProviderError>>) -> Self {
         err.into()
     }
 
@@ -122,8 +125,8 @@ pub trait FromEvmError<Evm: ConfigureEvm>:
         match result {
             ExecutionResult::Success { output, .. } => Ok(output.into_data()),
             ExecutionResult::Revert { output, .. } => Err(Self::from_revert(output)),
-            ExecutionResult::Halt { reason, gas_used } => {
-                Err(Self::from_evm_halt(reason, gas_used))
+            ExecutionResult::Halt { reason, gas, .. } => {
+                Err(Self::from_evm_halt(reason, gas.tx_gas_used()))
             }
         }
     }
@@ -131,7 +134,9 @@ pub trait FromEvmError<Evm: ConfigureEvm>:
 
 impl<T, Evm> FromEvmError<Evm> for T
 where
-    T: From<EvmErrorFor<Evm, ProviderError>> + FromEvmHalt<HaltReasonFor<Evm>> + FromRevert,
+    T: From<EvmErrorFor<Evm, EvmDatabaseError<ProviderError>>>
+        + FromEvmHalt<HaltReasonFor<Evm>>
+        + FromRevert,
     Evm: ConfigureEvm,
 {
 }

@@ -27,8 +27,8 @@ Networking:
       --disable-discv4-discovery
           Disable Discv4 discovery
 
-      --enable-discv5-discovery
-          Enable Discv5 discovery
+      --disable-discv5-discovery
+          Disable Discv5 discovery
 
       --disable-nat
           Disable Nat discovery
@@ -189,6 +189,16 @@ Networking:
 
           [default: 25600]
 
+      --tx-channel-memory-limit <BYTES>
+          Memory limit (in bytes) for the channel that buffers transaction events flowing
+          from the network manager to the transactions manager.
+
+          When the budget is exhausted, new events are dropped (see metric
+          `total_dropped_tx_events_at_full_capacity`). Acts as a backstop against unbounded
+          memory growth under sustained P2P transaction flooding.
+
+          [default: 1073741824]
+
       --net-if.experimental <IF_NAME>
           Name of network interface used to communicate with peers.
 
@@ -226,12 +236,20 @@ Networking:
       --network-id <NETWORK_ID>
           Optional network ID to override the chain specification's network ID for P2P connections
 
+      --eth-max-message-size <BYTES>
+          Maximum allowed ETH message size in bytes. Default is 10 MiB
+
       --netrestrict <NETRESTRICT>
           Restrict network communication to the given IP networks (CIDR masks).
 
           Comma separated list of CIDR network specifications. Only peers with IP addresses within these ranges will be allowed to connect.
 
           Example: --netrestrict "192.168.0.0/16,10.0.0.0/8"
+
+      --enforce-enr-fork-id
+          Enforce EIP-868 ENR fork ID validation for discovered peers.
+
+          When enabled, peers discovered without a confirmed fork ID are not added to the peer set until their fork ID is verified via EIP-868 ENR request. This filters out peers from other networks that pollute the discovery table.
 
 Datadir:
       --datadir <DATA_DIR>
@@ -250,6 +268,9 @@ Datadir:
 
       --datadir.rocksdb <PATH>
           The absolute path to store `RocksDB` database in.
+
+      --datadir.pprof-dumps <PATH>
+          The absolute path to store pprof dumps in.
 
       --config <FILE>
           The path to the configuration file to use.
@@ -280,7 +301,7 @@ Logging:
       --log.stdout.filter <FILTER>
           The filter to use for logs written to stdout
 
-          [default: ]
+          [default: ""]
 
       --log.file.format <FORMAT>
           The format to use for logs written to the log file
@@ -313,9 +334,9 @@ Logging:
           [default: 200]
 
       --log.file.max-files <COUNT>
-          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled
+          The maximum amount of log files that will be stored. If set to 0, background file logging is disabled.
 
-          [default: 5]
+          Default: 5 for `node` command, 0 for non-node utility subcommands.
 
       --log.journald
           Write logs to journald
@@ -334,6 +355,24 @@ Logging:
           - never:  Colors off
 
           [default: always]
+
+      --logs-otlp[=<URL>]
+          Enable `Opentelemetry` logs export to an OTLP endpoint.
+
+          If no value provided, defaults based on protocol: - HTTP: `http://localhost:4318/v1/logs` - gRPC: `http://localhost:4317`
+
+          Example: --logs-otlp=http://collector:4318/v1/logs
+
+          [env: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=]
+
+      --logs-otlp.filter <FILTER>
+          Set a filter directive for the OTLP logs exporter. This controls the verbosity of logs sent to the OTLP endpoint. It follows the same syntax as the `RUST_LOG` environment variable.
+
+          Example: --logs-otlp.filter=info,reth=debug
+
+          Defaults to INFO if not specified.
+
+          [default: info]
 
 Display:
   -v, --verbosity...
@@ -359,9 +398,9 @@ Tracing:
           [env: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=]
 
       --tracing-otlp-protocol <PROTOCOL>
-          OTLP transport protocol to use for exporting traces.
+          OTLP transport protocol to use for exporting traces and logs.
 
-          - `http`: expects endpoint path to end with `/v1/traces` - `grpc`: expects endpoint without a path
+          - `http`: expects endpoint path to end with `/v1/traces` or `/v1/logs` - `grpc`: expects endpoint without a path
 
           Defaults to HTTP if not specified.
 

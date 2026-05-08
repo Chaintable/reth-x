@@ -52,8 +52,7 @@ impl InnerTransport {
         url: Url,
         jwt: JwtSecret,
     ) -> Result<(Self, Claims), AuthenticatedTransportError> {
-        let mut client_builder =
-            reqwest::Client::builder().tls_built_in_root_certs(url.scheme() == "https");
+        let mut client_builder = reqwest::Client::builder();
         let mut headers = reqwest::header::HeaderMap::new();
 
         // Add the JWT to the headers if we can decode it.
@@ -163,7 +162,7 @@ impl AuthenticatedTransport {
 
             // shift the iat forward by one second so there is some buffer time
             let mut shifted_claims = inner_and_claims.1;
-            shifted_claims.iat -= 1;
+            shifted_claims.iat -= 30;
 
             // if the claims are out of date, reset the inner transport
             if !shifted_claims.is_within_time_window() {

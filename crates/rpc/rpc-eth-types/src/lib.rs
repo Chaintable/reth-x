@@ -8,6 +8,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// `url` is needed for serde support on `reqwest::Url`
+use url as _;
+
 pub mod block;
 pub mod builder;
 pub mod cache;
@@ -26,6 +29,7 @@ pub mod tx_forward;
 pub mod utils;
 
 pub use alloy_rpc_types_eth::FillTransaction;
+pub use block::CachedTransaction;
 pub use builder::config::{EthConfig, EthFilterConfig};
 pub use cache::{
     config::EthStateCacheConfig, db::StateCacheDb, multi_consumer::MultiConsumerLruCache,
@@ -42,7 +46,7 @@ pub use transaction::TransactionSource;
 pub use tx_forward::ForwardConfig;
 
 pub use debank::{
-    build_debank_traces, build_genesis_txs_and_traces, get_storage_contracts_from_cache,
-    get_storage_contracts_from_genesis, get_storage_diffs_from_cache, BlockFile, BlockStorageDiff,
+    build_debank_traces, build_genesis_txs_and_traces, get_storage_contracts_from_bundle,
+    get_storage_contracts_from_genesis, get_storage_diffs_from_bundle, BlockFile, BlockStorageDiff,
     DebankBlock, DebankEvent, DebankOutPut, DebankTrace, DebankTransaction,
 };
