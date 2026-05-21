@@ -1,7 +1,7 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
-use crate::{FromEthApiError, FromEvmError};
+use crate::FromEvmError;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
@@ -19,11 +19,14 @@ use reth_revm::{
 };
 use reth_rpc_eth_types::{
     cache::db::{StateCacheDb, StateDiffDb, StateDiffTraceDB, StateProviderTraitObjWrapper},
-    debank::{get_storage_diffs_from_changesets, BlockStorageDiff},
+    debank::{get_storage_diffs_from_bundle_state, BlockStorageDiff},
     EthApiError,
 };
 use reth_storage_api::{ChangeSetReader, ProviderBlock, ProviderTx, StorageChangeSetReader};
-use revm::{context::Block, context_interface::result::ResultAndState, DatabaseCommit};
+use revm::{
+    context::Block, context_interface::result::ResultAndState,
+    database::states::bundle_state::BundleRetention, DatabaseCommit,
+};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
 
@@ -436,10 +439,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
     /// Executes all transactions of a block while collecting tracing output and the resulting
     /// [`BlockStorageDiff`].
     ///
-    /// Tracing still replays the block through a [`StateDiffTraceDB`] wrapper, while the final
-    /// [`BlockStorageDiff`] is materialized from the stored account/storage changesets and the
-    /// canonical post-block state. This keeps chain-specific post-execution transitions in the
-    /// state diff without coupling trace replay to a full validating block executor.
+    /// Tracing replays the block through a [`StateDiffTraceDB`] wrapper, then materializes the
+    /// final [`BlockStorageDiff`] from the replayed bundle state. This avoids deriving the diff
+    /// from the trace cache directly, which may retain intermediate touched-account values.
     fn trace_all_block<Setup, Insp, F, R>(
         &self,
         block_id: BlockId,
@@ -479,9 +481,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let block_number = evm_env.block_env.number().saturating_to();
                 let base_fee = evm_env.block_env.basefee();
 
-                // Load independent state providers: parent state for trace replay and canonical
-                // post-block state for diff materialization from stored changesets.
-                let post_state = this.state_at_block_id(block_hash.into()).await?;
+                // Load the parent state for replay. The state diff is built from the replayed
+                // bundle below, because historical post-state providers can differ from the
+                // transaction-level state that Debank snapshots encode on BSC.
                 let exec_state = this.state_at_block_id(state_at.into()).await?;
                 let inner_db = State::builder()
                     .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
@@ -514,24 +516,8 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
 
-                let account_changesets = this
-                    .provider()
-                    .account_block_changeset(block_number)
-                    .map_err(Self::Error::from_eth_err)?;
-                let storage_changesets = this
-                    .provider()
-                    .storage_changeset(block_number)
-                    .map_err(Self::Error::from_eth_err)?;
-                let diff = get_storage_diffs_from_changesets(
-                    account_changesets,
-                    storage_changesets,
-                    StateProviderDatabase::new(StateProviderTraitObjWrapper(post_state)),
-                )
-                .map_err(|err| {
-                    Self::Error::from_eth_err(EthApiError::EvmCustom(format!(
-                        "failed to build state diff from changesets: {err}"
-                    )))
-                })?;
+                db.db.merge_transitions(BundleRetention::Reverts);
+                let diff = get_storage_diffs_from_bundle_state(db.db.take_bundle());
                 Ok((results, diff))
             })
             .await
