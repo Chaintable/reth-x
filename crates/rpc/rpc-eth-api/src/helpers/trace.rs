@@ -2,7 +2,7 @@
 
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
 use crate::{FromEthApiError, FromEvmError};
-use alloy_consensus::{transaction::TxHashRef, BlockHeader};
+use alloy_consensus::{constants::KECCAK_EMPTY, transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
@@ -444,9 +444,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
     ///
     /// Tracing replays the block through a [`StateDiffTraceDB`] wrapper, while the final
     /// [`BlockStorageDiff`] is materialized from stored changesets and canonical post-block
-    /// storage. Replayed account state is only used as a fallback for non-sender accounts because
-    /// BSC archive state can diverge for those accounts, while transaction senders must keep the
-    /// canonical post-state gas accounting.
+    /// storage. Replayed account state is only used as a fallback for plain non-sender accounts
+    /// because BSC archive state can diverge for those accounts, while transaction senders and
+    /// contract accounts must keep canonical post-state gas and system transition accounting.
     fn trace_all_block<Setup, Insp, F, R>(
         &self,
         block_id: BlockId,
@@ -530,7 +530,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     .state
                     .into_iter()
                     .filter(|(address, _)| !tx_senders.contains(address))
-                    .map(|(address, account)| (address, account.info))
+                    .filter_map(|(address, account)| {
+                        let info = account.info?;
+                        (info.code_hash == KECCAK_EMPTY).then_some((address, Some(info)))
+                    })
                     .collect();
 
                 let account_changesets = this
