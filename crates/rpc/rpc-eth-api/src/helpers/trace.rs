@@ -1,7 +1,7 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
 use super::{Call, LoadBlock, LoadState, LoadTransaction};
-use crate::FromEvmError;
+use crate::{FromEthApiError, FromEvmError};
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
@@ -9,8 +9,8 @@ use futures::Future;
 use reth_chainspec::ChainSpecProvider;
 use reth_errors::ProviderError;
 use reth_evm::{
-    evm::EvmFactoryExt, execute::Executor, system_calls::SystemCaller, tracing::TracingCtx,
-    ConfigureEvm, Database, Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
+    evm::EvmFactoryExt, system_calls::SystemCaller, tracing::TracingCtx, ConfigureEvm, Database,
+    Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{
@@ -19,10 +19,10 @@ use reth_revm::{
 };
 use reth_rpc_eth_types::{
     cache::db::{StateCacheDb, StateDiffDb, StateDiffTraceDB, StateProviderTraitObjWrapper},
-    debank::{get_storage_diffs_from_bundle_state, BlockStorageDiff},
+    debank::{get_storage_diffs_from_changesets, BlockStorageDiff},
     EthApiError,
 };
-use reth_storage_api::{ProviderBlock, ProviderTx};
+use reth_storage_api::{ChangeSetReader, ProviderBlock, ProviderTx, StorageChangeSetReader};
 use revm::{context::Block, context_interface::result::ResultAndState, DatabaseCommit};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
@@ -436,11 +436,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
     /// Executes all transactions of a block while collecting tracing output and the resulting
     /// [`BlockStorageDiff`].
     ///
-    /// This uses a [`StateDiffTraceDB`] wrapper around the state cache database so that every
-    /// committed change is also captured in an in-memory diff database. After replay, the diff is
-    /// compared against a fresh read-only snapshot of the parent state (`pre_db`) to compute the
-    /// final [`BlockStorageDiff`]. This mirrors the behaviour of go-ethereum's `OnCommit` based
-    /// tracer but without requiring any changes to the core EVM.
+    /// Tracing still replays the block through a [`StateDiffTraceDB`] wrapper, while the final
+    /// [`BlockStorageDiff`] is materialized from the stored account/storage changesets and the
+    /// canonical post-block state. This keeps chain-specific post-execution transitions in the
+    /// state diff without coupling trace replay to a full validating block executor.
     fn trace_all_block<Setup, Insp, F, R>(
         &self,
         block_id: BlockId,
@@ -449,6 +448,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
     ) -> impl Future<Output = Result<(Vec<R>, BlockStorageDiff), Self::Error>> + Send
     where
         Self: LoadBlock,
+        Self::Provider: ChangeSetReader + StorageChangeSetReader,
         F: Fn(
                 TransactionInfo,
                 TracingCtx<
@@ -479,9 +479,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let block_number = evm_env.block_env.number().saturating_to();
                 let base_fee = evm_env.block_env.basefee();
 
-                // Load independent state providers for the parent block: one for trace replay and
-                // one for full block execution used to derive the final state diff.
-                let diff_state = this.state_at_block_id(state_at.into()).await?;
+                // Load independent state providers: parent state for trace replay and canonical
+                // post-block state for diff materialization from stored changesets.
+                let post_state = this.state_at_block_id(block_hash.into()).await?;
                 let exec_state = this.state_at_block_id(state_at.into()).await?;
                 let inner_db = State::builder()
                     .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
@@ -514,16 +514,24 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
 
-                let diff_output = this
-                    .evm_config()
-                    .executor(StateProviderDatabase::new(StateProviderTraitObjWrapper(diff_state)))
-                    .execute(&block)
-                    .map_err(|err| {
-                        EthApiError::EvmCustom(format!(
-                            "failed to execute block for state diff: {err}"
-                        ))
-                    })?;
-                let diff = get_storage_diffs_from_bundle_state(diff_output.state);
+                let account_changesets = this
+                    .provider()
+                    .account_block_changeset(block_number)
+                    .map_err(Self::Error::from_eth_err)?;
+                let storage_changesets = this
+                    .provider()
+                    .storage_changeset(block_number)
+                    .map_err(Self::Error::from_eth_err)?;
+                let diff = get_storage_diffs_from_changesets(
+                    account_changesets,
+                    storage_changesets,
+                    StateProviderDatabase::new(StateProviderTraitObjWrapper(post_state)),
+                )
+                .map_err(|err| {
+                    Self::Error::from_eth_err(EthApiError::EvmCustom(format!(
+                        "failed to build state diff from changesets: {err}"
+                    )))
+                })?;
                 Ok((results, diff))
             })
             .await

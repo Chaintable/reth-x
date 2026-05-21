@@ -10754,6 +10754,7 @@ dependencies = [
  "reqwest",
  "reth-chain-state",
  "reth-chainspec",
+ "reth-db-api",
  "reth-errors",
  "reth-ethereum-primitives",
  "reth-evm",
