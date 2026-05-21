@@ -63,24 +63,25 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
 
     // Process accounts
     for (address, db_account) in cache.accounts {
+        let pre_account = pre_db.basic_ref(address).ok().flatten();
+
         // Check if account is deleted (non-existing)
         if db_account.account_state == AccountState::NotExisting {
-            deleted_accounts.push(keccak256(address.0));
+            if pre_account.is_some() {
+                deleted_accounts.push(keccak256(address.0));
+            }
             continue;
         }
 
-        new_accounts.push(NewAccount {
-            address: keccak256(address.0),
-            balance: db_account.info.balance,
-            nonce: db_account.info.nonce,
-            code_hash: db_account.info.code_hash,
-        });
-
         // Collect storage changes
+        let mut has_storage_changes = false;
         if !db_account.storage.is_empty() {
             let diffs: Vec<IndexValuePair> = db_account
                 .storage
                 .into_iter()
+                .filter(|(key, value)| {
+                    pre_db.storage_ref(address, *key).map_or(true, |pre_value| pre_value != *value)
+                })
                 .map(|(key, value)| IndexValuePair {
                     index: keccak256::<[u8; 32]>(key.to_be_bytes()),
                     value,
@@ -88,16 +89,37 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
                 .collect();
 
             if !diffs.is_empty() {
+                has_storage_changes = true;
                 storage_diffs.push(AccountStorageDiff { address: keccak256(address.0), diffs });
             }
         }
 
+        let account_changed = pre_account.as_ref().map_or_else(
+            || {
+                db_account.info.balance != U256::ZERO ||
+                    db_account.info.nonce != 0 ||
+                    db_account.info.code_hash != KECCAK_EMPTY
+            },
+            |account| {
+                account.balance != db_account.info.balance ||
+                    account.nonce != db_account.info.nonce ||
+                    account.code_hash != db_account.info.code_hash
+            },
+        );
+
+        if account_changed || has_storage_changes {
+            new_accounts.push(NewAccount {
+                address: keccak256(address.0),
+                balance: db_account.info.balance,
+                nonce: db_account.info.nonce,
+                code_hash: db_account.info.code_hash,
+            });
+        }
+
         if let Some(code) = db_account.info.code {
             let code_hash = db_account.info.code_hash;
-            if let Ok(Some(account)) = pre_db.basic_ref(address) {
-                if account.code_hash == code_hash {
-                    continue; // Code already exists in the previous state
-                }
+            if pre_account.as_ref().is_some_and(|account| account.code_hash == code_hash) {
+                continue; // Code already exists in the previous state
             }
             if code_hash != KECCAK_EMPTY {
                 // Only add non-empty codes
