@@ -10,7 +10,7 @@ use reth_db_api::models::{AccountBeforeTx, BlockNumberAddress};
 use reth_primitives_traits::{Block, RecoveredBlock, StorageEntry, Transaction};
 use reth_revm::db::{AccountState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
-use revm::{database::BundleState, interpreter::InstructionResult, DatabaseRef};
+use revm::{interpreter::InstructionResult, state::AccountInfo, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
 use revm_inspectors::tracing::{
     types::{CallKind, CallLog, CallTraceNode, TraceMemberOrder},
@@ -145,6 +145,7 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
 pub fn get_storage_diffs_from_changesets<DB: DatabaseRef>(
     account_changesets: Vec<AccountBeforeTx>,
     storage_changesets: Vec<(BlockNumberAddress, StorageEntry)>,
+    account_post_overrides: BTreeMap<Address, Option<AccountInfo>>,
     post_db: DB,
 ) -> Result<BlockStorageDiff, DB::Error> {
     let mut new_accounts = Vec::new();
@@ -173,7 +174,10 @@ pub fn get_storage_diffs_from_changesets<DB: DatabaseRef>(
     }
 
     for address in changed_addresses {
-        let post_account = post_db.basic_ref(address)?;
+        let post_account = match account_post_overrides.get(&address) {
+            Some(account) => account.clone(),
+            None => post_db.basic_ref(address)?,
+        };
         let pre_account =
             account_pre_state.get(&address).cloned().unwrap_or_else(|| post_account.clone());
         let diffs = storage_by_address.remove(&address).unwrap_or_default();
@@ -221,69 +225,6 @@ pub fn get_storage_diffs_from_changesets<DB: DatabaseRef>(
         storage_diffs,
         new_codes,
     })
-}
-
-pub fn get_storage_diffs_from_bundle_state(bundle_state: BundleState) -> BlockStorageDiff {
-    let mut new_accounts = Vec::new();
-    let mut deleted_accounts = Vec::new();
-    let mut storage_diffs = Vec::new();
-    let mut changed_code_hashes = HashSet::new();
-
-    for (address, account) in bundle_state.state {
-        let mut diffs = Vec::new();
-        for (key, slot) in account.storage {
-            if slot.is_changed() {
-                diffs.push(IndexValuePair {
-                    index: keccak256::<[u8; 32]>(key.to_be_bytes()),
-                    value: slot.present_value(),
-                });
-            }
-        }
-
-        let has_storage_changes = !diffs.is_empty();
-        if has_storage_changes {
-            storage_diffs.push(AccountStorageDiff { address: keccak256(address.0), diffs });
-        }
-
-        let Some(info) = account.info else {
-            if account.original_info.is_some() {
-                deleted_accounts.push(keccak256(address.0));
-            }
-            continue;
-        };
-
-        let account_changed = account.original_info.as_ref() != Some(&info);
-        if account_changed || has_storage_changes {
-            if account.original_info.as_ref().map(|account| account.code_hash) !=
-                Some(info.code_hash)
-            {
-                changed_code_hashes.insert(info.code_hash);
-            }
-
-            new_accounts.push(NewAccount {
-                address: keccak256(address.0),
-                balance: info.balance,
-                nonce: info.nonce,
-                code_hash: info.code_hash,
-            });
-        }
-    }
-
-    let mut new_codes = Vec::new();
-    for (code_hash, code) in bundle_state.contracts {
-        if code_hash != KECCAK_EMPTY && changed_code_hashes.contains(&code_hash) {
-            new_codes.push(NewCode { code_hash, code: code.original_bytes() });
-        }
-    }
-
-    BlockStorageDiff {
-        hash: H256::ZERO,
-        parent_hash: EMPTY_ROOT_HASH,
-        new_accounts,
-        deleted_accounts,
-        storage_diffs,
-        new_codes,
-    }
 }
 
 impl From<&Genesis> for BlockStorageDiff {
