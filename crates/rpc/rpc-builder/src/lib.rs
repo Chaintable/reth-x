@@ -55,7 +55,7 @@ use reth_rpc_layer::{AuthLayer, Claims, CompressionLayer, JwtAuthValidator, JwtS
 pub use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
     AccountReader, BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider,
-    StateProviderFactory,
+    StateProviderFactory, StorageChangeSetReader,
 };
 use reth_tasks::{pool::BlockingTaskGuard, TaskSpawner, TokioTaskExecutor};
 use reth_tokio_util::EventSender;
@@ -313,7 +313,8 @@ where
         + CanonStateSubscriptions<Primitives = N>
         + PersistedBlockSubscriptions
         + AccountReader
-        + ChangeSetReader,
+        + ChangeSetReader
+        + StorageChangeSetReader,
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EvmConfig: ConfigureEvm<Primitives = N> + 'static,
@@ -716,6 +717,7 @@ where
     pub fn register_trace(&mut self) -> &mut Self
     where
         EthApi: TraceExt + EthBlocks + LoadReceipt,
+        EthApi::Provider: ChangeSetReader + StorageChangeSetReader,
     {
         let trace_api = self.trace_api();
         self.modules.insert(RethRpcModule::Trace, trace_api.into_rpc().into());
@@ -847,10 +849,12 @@ where
         + CanonStateSubscriptions<Primitives = N>
         + PersistedBlockSubscriptions
         + AccountReader
-        + ChangeSetReader,
+        + ChangeSetReader
+        + StorageChangeSetReader,
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: FullEthApiServer,
+    EthApi::Provider: ChangeSetReader + StorageChangeSetReader,
     EvmConfig: ConfigureEvm<Primitives = N> + 'static,
     Consensus: FullConsensus<N> + Clone + 'static,
 {
