@@ -51,6 +51,7 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{error::FromEvmError, EthApiError};
 use reth_rpc_server_types::RethRpcModule;
+use reth_storage_api::StorageChangeSetReader;
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, EthTransactionPool, PoolPooledTx, PoolTransaction,
@@ -277,6 +278,7 @@ where
         >,
         Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
     >,
+    N::Provider: StorageChangeSetReader,
     EthB: EthApiBuilder<N>,
     PVB: Send,
     EB: EngineApiBuilder<N>,
@@ -346,6 +348,7 @@ where
         >,
         Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
     >,
+    N::Provider: StorageChangeSetReader,
     EthB: EthApiBuilder<N>,
     PVB: PayloadValidatorBuilder<N>,
     EB: EngineApiBuilder<N>,
@@ -390,6 +393,7 @@ where
 impl<N> Node<N> for EthereumNode
 where
     N: FullNodeTypes<Types = Self>,
+    N::Provider: StorageChangeSetReader,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -412,7 +416,11 @@ where
     }
 }
 
-impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for EthereumNode {
+impl<N> DebugNode<N> for EthereumNode
+where
+    N: FullNodeComponents<Types = Self>,
+    N::Provider: StorageChangeSetReader,
+{
     type RpcBlock = alloy_rpc_types_eth::Block;
 
     fn rpc_to_primitive_block(rpc_block: Self::RpcBlock) -> reth_ethereum_primitives::Block {

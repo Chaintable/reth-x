@@ -37,7 +37,7 @@ use reth_rpc_eth_types::{
     utils::recover_raw_transaction,
     EthConfig,
 };
-use reth_storage_api::{BlockNumReader, BlockReader};
+use reth_storage_api::{BlockNumReader, BlockReader, ChangeSetReader, StorageChangeSetReader};
 use reth_tasks::pool::BlockingTaskGuard;
 use reth_transaction_pool::{PoolPooledTx, PoolTransaction, TransactionPool};
 use revm::DatabaseCommit;
@@ -625,6 +625,7 @@ where
 impl<Eth> TraceApi<Eth>
 where
     Eth: TraceExt + EthBlocks + LoadReceipt + 'static,
+    Eth::Provider: ChangeSetReader + StorageChangeSetReader,
 {
     /// Returns debank-specific tracing information for the given block.
     pub async fn trace_debank_block(&self, block_id: BlockId) -> Result<DebankOutPut, Eth::Error> {
@@ -769,6 +770,7 @@ where
 impl<Eth> TraceApiServer<RpcTxReq<Eth::NetworkTypes>> for TraceApi<Eth>
 where
     Eth: TraceExt + EthBlocks + LoadReceipt + 'static,
+    Eth::Provider: ChangeSetReader + StorageChangeSetReader,
 {
     /// Executes the given call and returns a number of possible traces for it.
     ///
