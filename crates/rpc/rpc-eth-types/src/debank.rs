@@ -7,7 +7,7 @@ use alloy_primitives::{
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use alloy_rpc_types_eth::Header;
 use reth_primitives_traits::{Block, RecoveredBlock, Transaction};
-use reth_revm::db::{AccountState, Cache};
+use reth_revm::db::{AccountState, BundleState, Cache};
 use reth_trie::EMPTY_ROOT_HASH;
 use revm::{interpreter::InstructionResult, DatabaseRef};
 use revm_bytecode::opcode::OpCode;
@@ -17,7 +17,7 @@ use revm_inspectors::tracing::{
 };
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 #[derive(Debug, Clone, PartialEq, RlpDecodable, RlpEncodable, Default)]
 pub struct BlockStorageDiff {
@@ -131,6 +131,70 @@ pub fn get_storage_diffs_from_cache<DB: DatabaseRef>(cache: Cache, pre_db: DB) -
     BlockStorageDiff {
         hash: H256::ZERO,             // These will need to be set by the caller
         parent_hash: EMPTY_ROOT_HASH, // These will need to be set by the caller
+        new_accounts,
+        deleted_accounts,
+        storage_diffs,
+        new_codes,
+    }
+}
+
+pub fn get_storage_diffs_from_bundle_state(bundle_state: BundleState) -> BlockStorageDiff {
+    let mut new_accounts = Vec::new();
+    let mut deleted_accounts = Vec::new();
+    let mut storage_diffs = Vec::new();
+    let mut changed_code_hashes = HashSet::new();
+
+    for (address, account) in bundle_state.state {
+        if account.info.is_none() {
+            if account.original_info.is_some() {
+                deleted_accounts.push(keccak256(address.0));
+            }
+            continue;
+        }
+
+        let info = account.info.unwrap();
+        let mut diffs = Vec::new();
+        for (key, slot) in account.storage {
+            if slot.is_changed() {
+                diffs.push(IndexValuePair {
+                    index: keccak256::<[u8; 32]>(key.to_be_bytes()),
+                    value: slot.present_value(),
+                });
+            }
+        }
+
+        let has_storage_changes = !diffs.is_empty();
+        if has_storage_changes {
+            storage_diffs.push(AccountStorageDiff { address: keccak256(address.0), diffs });
+        }
+
+        let account_changed = account.original_info.as_ref() != Some(&info);
+        if account_changed || has_storage_changes {
+            if account.original_info.as_ref().map(|account| account.code_hash) !=
+                Some(info.code_hash)
+            {
+                changed_code_hashes.insert(info.code_hash);
+            }
+
+            new_accounts.push(NewAccount {
+                address: keccak256(address.0),
+                balance: info.balance,
+                nonce: info.nonce,
+                code_hash: info.code_hash,
+            });
+        }
+    }
+
+    let mut new_codes = Vec::new();
+    for (code_hash, code) in bundle_state.contracts {
+        if code_hash != KECCAK_EMPTY && changed_code_hashes.contains(&code_hash) {
+            new_codes.push(NewCode { code_hash, code: code.original_bytes() });
+        }
+    }
+
+    BlockStorageDiff {
+        hash: H256::ZERO,
+        parent_hash: EMPTY_ROOT_HASH,
         new_accounts,
         deleted_accounts,
         storage_diffs,

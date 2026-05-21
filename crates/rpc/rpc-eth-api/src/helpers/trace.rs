@@ -9,8 +9,8 @@ use futures::Future;
 use reth_chainspec::ChainSpecProvider;
 use reth_errors::ProviderError;
 use reth_evm::{
-    evm::EvmFactoryExt, system_calls::SystemCaller, tracing::TracingCtx, ConfigureEvm, Database,
-    Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
+    evm::EvmFactoryExt, execute::Executor, system_calls::SystemCaller, tracing::TracingCtx,
+    ConfigureEvm, Database, Evm, EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{
@@ -19,7 +19,7 @@ use reth_revm::{
 };
 use reth_rpc_eth_types::{
     cache::db::{StateCacheDb, StateDiffDb, StateDiffTraceDB, StateProviderTraitObjWrapper},
-    debank::{get_storage_diffs_from_cache, BlockStorageDiff},
+    debank::{get_storage_diffs_from_bundle_state, BlockStorageDiff},
     EthApiError,
 };
 use reth_storage_api::{ProviderBlock, ProviderTx};
@@ -479,13 +479,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let block_number = evm_env.block_env.number().saturating_to();
                 let base_fee = evm_env.block_env.basefee();
 
-                // Load two independent state providers for the parent block: one for execution
-                // (wrapped in [`StateDiffTraceDB`]) and one as a read-only pre-state snapshot used
-                // to compute the diff.
-                let pre_state = this.state_at_block_id(state_at.into()).await?;
+                // Load independent state providers for the parent block: one for trace replay and
+                // one for full block execution used to derive the final state diff.
+                let diff_state = this.state_at_block_id(state_at.into()).await?;
                 let exec_state = this.state_at_block_id(state_at.into()).await?;
-
-                let pre_db = StateProviderDatabase::new(StateProviderTraitObjWrapper(pre_state));
                 let inner_db = State::builder()
                     .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
                         exec_state,
@@ -517,7 +514,16 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                     .commit_last_tx()
                     .collect::<Result<_, _>>()?;
 
-                let diff = get_storage_diffs_from_cache(db.diff.cache, pre_db);
+                let diff_output = this
+                    .evm_config()
+                    .executor(StateProviderDatabase::new(StateProviderTraitObjWrapper(diff_state)))
+                    .execute(&block)
+                    .map_err(|err| {
+                        EthApiError::EvmCustom(format!(
+                            "failed to execute block for state diff: {err}"
+                        ))
+                    })?;
+                let diff = get_storage_diffs_from_bundle_state(diff_output.state);
                 Ok((results, diff))
             })
             .await
