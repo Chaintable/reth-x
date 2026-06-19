@@ -7,18 +7,22 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
-  IMAGE: blockchain-rethx
+  REGISTRY: public.ecr.aws/b2h7a5c4/chaintable
+  IMAGE: reth-x
   OP_IMAGE: blockchain-op-rethx
   DOCKERFILE: Dockerfile
-  AWS_REGION: ap-northeast-1
+  AWS_REGION: us-east-1
+  CHAINS: "plasma botanix"
 
 jobs:
   build-artifacts:
     strategy:
       matrix:
-        arch: [ amd64 ]
+        arch: [ amd64, arm64 ]
     runs-on: [self-hosted, "${{ matrix.arch }}"]
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -30,16 +34,56 @@ jobs:
           echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
 
       - name: Docker build and push
         run: |
           git submodule update --init --recursive
           docker build -t ${REGISTRY}/${IMAGE}:${{ matrix.arch }}-${REVISION} -f ${DOCKERFILE} .
           docker push ${REGISTRY}/${IMAGE}:${{ matrix.arch }}-${REVISION}
+
+  merge-docker-manifest:
+    runs-on: [self-hosted, general]
+    needs: build-artifacts
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set env
+        run: |
+          echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Merge manifest and alias per-chain writers
+        run: |
+          # repo 级 multi-arch manifest + latest
+          docker buildx imagetools create --tag ${REGISTRY}/${IMAGE}:${REVISION} --tag ${REGISTRY}/${IMAGE}:latest ${REGISTRY}/${IMAGE}:amd64-${REVISION} ${REGISTRY}/${IMAGE}:arm64-${REVISION}
+          # 各链 writer 别名(同 digest,多名) + latest
+          for c in ${CHAINS}; do
+            docker buildx imagetools create --tag ${REGISTRY}/${c}-writer:${REVISION} --tag ${REGISTRY}/${c}-writer:latest ${REGISTRY}/${IMAGE}:${REVISION}
+          done
