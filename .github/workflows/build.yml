@@ -3,7 +3,7 @@ name: "Build new ext"
 on:
   pull_request:
     branches:
-      - 'debank'
+      - 'main'
   workflow_dispatch:
 
 env:
