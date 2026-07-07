@@ -1,242 +1,118 @@
-## Contributing to Reth
+# Contributing
 
-Thanks for your interest in improving Reth!
+Thanks for your interest in contributing.
 
-There are multiple opportunities to contribute at any level. It doesn't matter if you are just getting started with Rust
-or if you are already the most weathered expert, we can use your help.
+This repository is a **fork**: upstream [paradigmxyz/reth](https://github.com/paradigmxyz/reth)
+plus the [Chaintable pipeline](https://github.com/Chaintable/pipeline) tracer. It
+runs write node(s) that produce block data for the Chaintable data pipeline, for
+the chain(s) listed in this repository's CI configuration and README. It is not
+a general-purpose fork of paradigmxyz/reth.
 
-**No contribution is too small and all contributions are valued.**
+**First, determine where your change belongs:**
 
-This document will help you get started. **Do not let the document intimidate you**.
-It should be considered as a guide to help you navigate the process.
+- **Chain client changes** (consensus, p2p, EVM, RPC, txpool) — contribute
+  **upstream**, following their contributing process. We cannot accept
+  chain-core changes in this fork: they would diverge from upstream and be lost
+  or cause conflicts at the next upstream merge. If an upstream fix matters to
+  this fork, open an issue here linking the upstream PR/commit and we will pull
+  it in with the next sync.
 
-The [dev Telegram][dev-tg] is available for any concerns you may have that are not covered in this guide.
+- **Pipeline layer changes** — the pipeline tracer and its block-data output,
+  the Dockerfile, published images, CI workflows, or docs about running this
+  write node — contribute **here**, following the process below.
 
-If you contribute to this project, your contributions will be made to the project under both Apache 2.0 and the MIT
-license.
+---
 
-### Code of Conduct
+## Our Process (contributions to the Chaintable pipeline layer)
 
-The Reth project adheres to the [Rust Code of Conduct][rust-coc]. This code of conduct describes the _minimum_ behavior
-expected from all contributors.
+### Getting Started
 
-Instances of violations of the Code of Conduct can be reported by contacting the team
-at [georgios@paradigm.xyz](mailto:georgios@paradigm.xyz).
+Requirements:
 
-### Ways to contribute
+* Rust (see `Cargo.toml` / `rust-toolchain`)
 
-There are fundamentally three ways an individual can contribute:
+### Development Workflow
 
-1. **By opening an issue:** For example, if you believe that you have uncovered a bug
-   in Reth, creating a new issue in the issue tracker is the way to report it.
-2. **By adding context:** Providing additional context to existing issues,
-   such as screenshots and code snippets to help resolve issues.
-3. **By resolving issues:** Typically this is done in the form of either
-   demonstrating that the issue reported is not a problem after all, or more often,
-   by opening a pull request that fixes the underlying problem, in a concrete and
-   reviewable manner.
+1. Fork the repository
+2. Create a branch from `main`
+3. Make changes, focused on the pipeline layer
+4. Run local checks
+5. Open a PR
 
-**Anybody can participate in any stage of contribution**. We urge you to participate in the discussion around bugs and
-participate in reviewing PRs.
+Keep PRs small and focused.
 
-### Contributions Related to Spelling and Grammar
+### Local Checks (must pass)
 
-At this time, we will not be accepting contributions that only fix spelling or grammatical errors in documentation, code or
-elsewhere.
-
-### Asking for help
-
-<!-- If you have reviewed existing documentation and still have questions, or you are having problems, you can get help in the following ways: -->
-
-<!-- -   **Asking in the support Telegram:** The [Foundry Support Telegram][support-tg] is a fast and easy way to ask questions. -->
-<!-- -   **Opening a discussion:** This repository comes with a discussions board where you can also ask for help. Click the "Discussions" tab at the top. -->
-
-If you have reviewed existing documentation and still have questions, or you are having problems, you can get help by **opening a discussion**. This repository comes with a discussions board where you can also ask for help. Click the "Discussions" tab at the top.
-
-As Reth is still in heavy development, the documentation can be a bit scattered. The [Reth Docs][reth-docs] is our
-current best-effort attempt at keeping up-to-date information.
-
-### Submitting a bug report
-
-When filing a new bug report in the issue tracker, you will be presented with a basic form to fill out.
-
-If you believe that you have uncovered a bug, please fill out the form to the best of your ability. Do not worry if you
-cannot answer every detail, just fill in what you can. Contributors will ask follow-up questions if something is
-unclear.
-
-The most important pieces of information we need in a bug report are:
-
-- The Reth version you are on (and that it is up to date)
-- The platform you are on (Windows, macOS, an M1 Mac or Linux)
-- Code snippets if this is happening in relation to testing or building code
-- Concrete steps to reproduce the bug
-
-In order to rule out the possibility of the bug being in your project, the code snippets should be as minimal as
-possible. It is better if you can reproduce the bug with a small snippet as opposed to an entire project!
-
-See [this guide][mcve] on how to create a minimal, complete, and verifiable example.
-
-### Submitting a feature request
-
-When adding a feature request in the issue tracker, you will be presented with a basic form to fill out.
-
-Please include as detailed of an explanation as possible of the feature you would like, adding additional context if
-necessary.
-
-If you have examples of other tools that have the feature you are requesting, please include them as well.
-
-### Resolving an issue
-
-Pull requests are the way concrete changes are made to the code, documentation, and dependencies of Reth.
-
-Even tiny pull requests, like fixing wording, are greatly appreciated. Before making a large change, it is usually a
-good idea to first open an issue describing the change to solicit feedback and guidance. This will increase the
-likelihood of the PR getting merged.
-
-Please also make sure that the following commands pass if you have changed the code:
-
-```sh
-make pr
+```bash
+make build
+make test
 ```
 
-If you are working in VSCode, we recommend you install the [rust-analyzer](https://rust-analyzer.github.io/) extension,
-and use the following VSCode user settings:
+### Code Guidelines
 
-```json
-"editor.formatOnSave": true,
-"rust-analyzer.rustfmt.extraArgs": ["+nightly"],
-"[rust]": {
-"editor.defaultFormatter": "rust-lang.rust-analyzer"
-}
+* Keep the diff minimal — prefer hooks over invasive edits to client code
+* Match the existing code style and conventions (`gofmt`)
+* Prefer simple and explicit logic
+* Do not change chain-core behavior (see the top of this document)
+
+### Testing
+
+Changes to the pipeline layer must include tests where practical. At minimum,
+describe how you verified the emitted data: chain, block range, and what you
+compared it against.
+
+### Pull Requests
+
+Before submitting:
+
+* Local checks pass
+* Tests added or updated
+* Behavior changes clearly explained
+
+PRs should include:
+
+* Summary
+* Motivation
+* Testing details
+* Compatibility impact
+
+Note on CI: it builds the Docker images for this repository, and the image
+publishing steps need repository credentials, which GitHub does not provide to
+pull requests from forks — those steps failing on a fork PR is expected. A
+maintainer will build and verify your change on an internal branch.
+
+### Commit Guidelines
+
+* Use clear, descriptive messages
+
+Example:
+
+```
+tracer: fix state-diff ordering for reorged blocks
 ```
 
-If you are working on a larger feature, we encourage you to open up a draft pull request, to make sure that other
-contributors are not duplicating work.
+### Releases
 
-#### Adding tests
+* Release tags follow `v<base-version>-ct.N` (`ct` = Chaintable; e.g.
+  `v0.0.9-bsc-ct.8`); a GitHub Release publishes the versioned images
 
-If the change being proposed alters code, it is either adding new functionality to Reth, or fixing existing, broken
-functionality.
-In both of these cases, the pull request should include one or more tests to ensure that Reth does not regress in the
-future.
+### Reporting Issues
 
-Types of tests include:
+Please include:
 
-- **Unit tests**: Functions which have very specific tasks should be unit tested.
-- **Integration tests**: For general purpose, far reaching functionality,
-  integration tests should be added. The best way to add a new integration test is to look at existing ones and follow
-  the style.
+* Image tag or commit
+* Chain and block height
+* Reproduction steps
+* Expected vs actual behavior
 
-#### Running Individual tests
+### Security
 
-By default, `cargo test` does not select any packages, in order to run individual tests by name (
-e.g. `cargo test mytest`) navigate to the directory of that file (e.g. `reth/crates/rpc/rpc/`) or use
-the `-p <package-name>` option to run specific tests of a crate from anywhere in the
-workspace (`cargo test -p reth-rpc mytest`).
+Do not disclose vulnerabilities publicly.
 
-See also [cargo-test](https://doc.rust-lang.org/cargo/commands/cargo-test.html) for more information on running tests.
+See [SECURITY.md](./SECURITY.md) for reporting instructions.
 
-#### Commits
+### License
 
-It is a recommended best practice to keep your changes as logically grouped as possible within individual commits. There
-is no limit to the number of commits any single pull request may have, and many contributors find it easier to review
-changes that are split across multiple commits.
-
-That said, if you have a number of commits that are "checkpoints" and don't represent a single logical change, please
-squash those together.
-
-#### Opening the pull request
-
-From within GitHub, opening a new pull request will present you with a template that should be filled out. Please try
-your best at filling out the details, but feel free to skip parts if you're not sure what to put.
-
-#### Discuss and update
-
-You will probably get feedback or requests for changes to your pull request.
-This is a big part of the submission process, so don't be discouraged! Some contributors may sign off on the pull
-request right away, others may have more detailed comments or feedback. This is a necessary part of the process in order
-to evaluate whether the changes are correct and necessary.
-
-**Any community member can review a PR, so you might get conflicting feedback**. Keep an eye out for comments from code
-owners to provide guidance on conflicting feedback.
-
-#### Reviewing pull requests
-
-**Any Reth community member is welcome to review any pull request**.
-
-All contributors who choose to review and provide feedback on pull requests have a responsibility to both the project
-and individual making the contribution. Reviews and feedback must be helpful, insightful, and geared towards improving
-the contribution as opposed to simply blocking it. If there are reasons why you feel the PR should not be merged,
-explain what those are. Do not expect to be able to block a PR from advancing simply because you say "no" without giving
-an explanation. Be open to having your mind changed. Be open to working _with_ the contributor to make the pull request
-better.
-
-Reviews that are dismissive or disrespectful of the contributor or any other reviewers are strictly counter to
-the [Code of Conduct][coc-header].
-
-When reviewing a pull request, the primary goals are for the codebase to improve and for the person submitting the
-request to succeed. **Even if a pull request is not merged, the submitter should come away from the experience feeling
-like their effort was not unappreciated**. Every PR from a new contributor is an opportunity to grow the community.
-
-##### Review a bit at a time
-
-Do not overwhelm new contributors.
-
-It is tempting to micro-optimize and make everything about relative performance, perfect grammar, or exact style
-matches. Do not succumb to that temptation.
-
-Focus first on the most significant aspects of the change:
-
-1. Does this change make sense for Reth?
-2. Does this change make Reth better, even if only incrementally?
-3. Are there clear bugs or larger scale issues that need attending?
-4. Are the commit messages readable and correct? If it contains a breaking change, is it clear enough?
-
-Note that only **incremental** improvement is needed to land a PR. This means that the PR does not need to be perfect,
-only better than the status quo. Follow-up PRs may be opened to continue iterating.
-
-When changes are necessary, _request_ them, do not _demand_ them, and **do not assume that the submitter already knows
-how to add a test or run a benchmark**.
-
-Specific performance optimization techniques, coding styles and conventions change over time. The first impression you
-give to a new contributor never does.
-
-Nits (requests for small changes that are not essential) are fine, but try to avoid stalling the pull request. Most nits
-can typically be fixed by the Reth maintainers merging the pull request, but they can also be an opportunity for the
-contributor to learn a bit more about the project.
-
-It is always good to clearly indicate nits when you comment,
-e.g.: `Nit: change foo() to bar(). But this is not blocking`.
-
-If your comments were addressed but were not folded after new commits, or if they proved to be mistaken,
-please, [hide them][hiding-a-comment] with the appropriate reason to keep the conversation flow concise and relevant.
-
-##### Be aware of the person behind the code
-
-Be aware that _how_ you communicate requests and reviews in your feedback can have a significant impact on the success
-of the pull request. Yes, we may merge a particular change that makes Reth better, but the individual might just not
-want to have anything to do with Reth ever again. The goal is not just having good code.
-
-##### Abandoned or stale pull requests
-
-If a pull request appears to be abandoned or stalled, it is polite to first check with the contributor to see if they
-intend to continue the work before checking if they would mind if you took it over (especially if it just has nits
-left). When doing so, it is courteous to give the original contributor credit for the work they started, either by
-preserving their name and e-mail address in the commit log, or by using the `Author: ` or `Co-authored-by: ` metadata
-tag in the commits.
-
-_Adapted from the [Foundry contributing guide][foundry-contributing]_.
-
-[rust-coc]: https://github.com/rust-lang/rust/blob/master/CODE_OF_CONDUCT.md
-
-[coc-header]: #code-of-conduct
-
-[dev-tg]: https://t.me/paradigm_reth
-
-[reth-docs]: https://github.com/paradigmxyz/reth/tree/main/docs
-
-[mcve]: https://stackoverflow.com/help/mcve
-
-[hiding-a-comment]: https://help.github.com/articles/managing-disruptive-comments/#hiding-a-comment
-
-[foundry-contributing]: https://github.com/foundry-rs/foundry/blob/master/CONTRIBUTING.md
+By contributing, you agree that your contributions are licensed under the same
+terms as this repository — see [LICENSE-APACHE](./LICENSE-APACHE) and
+[LICENSE-MIT](./LICENSE-MIT).
