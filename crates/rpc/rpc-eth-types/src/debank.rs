@@ -483,6 +483,8 @@ impl From<&CallLog> for DebankEvent {
     }
 }
 
+const PARENT_CALL_FAILED_ERROR: &str = "parent call failed";
+
 enum DebankTraceOrLog {
     Trace(DebankTraceNode),
     Log(DebankEvent),
@@ -504,8 +506,12 @@ fn build_trace_node(
     trace_address: Vec<usize>,
     log_index: &mut usize,
 ) -> DebankTraceNode {
+    let mut trace: DebankTrace = node.into();
+    if !parent_success && trace.error.is_empty() {
+        trace.error = PARENT_CALL_FAILED_ERROR.to_string();
+    }
     let mut debank_node = DebankTraceNode {
-        trace: node.into(),
+        trace,
         children: Vec::new(),
         success: node.trace.success && parent_success,
     };
@@ -562,6 +568,7 @@ fn build_trace_node(
     if node.is_selfdestruct() {
         child_trace_address.last_mut().map(|last| *last += 1);
         debank_node.trace.subtraces += 1;
+        let success = parent_success && debank_node.success;
         let mut selfdestruct_trace = DebankTrace {
             from_addr: node.trace.selfdestruct_address.unwrap_or_default(),
             to_addr: node.trace.selfdestruct_refund_target.unwrap_or_default(),
@@ -573,11 +580,14 @@ fn build_trace_node(
             call_create_type: "suicide".to_string(),
             ..Default::default()
         };
+        if !success {
+            selfdestruct_trace.error = PARENT_CALL_FAILED_ERROR.to_string();
+        }
         selfdestruct_trace.id = selfdestruct_trace.debank_id();
         debank_node.children.push(DebankTraceOrLog::Trace(DebankTraceNode {
             trace: selfdestruct_trace,
             children: vec![],
-            success: parent_success && debank_node.success,
+            success,
         }));
     }
     debank_node
@@ -818,7 +828,8 @@ mod tests {
         },
         state::{AccountInfo, Bytecode},
     };
-    use std::collections::BTreeMap;
+    use revm_inspectors::tracing::types::CallTrace;
+    use std::{cell::RefCell, collections::BTreeMap};
 
     pub fn get_storage_contracts_from_cache(cache: &Cache) -> Vec<Address> {
         let mut addresses = Vec::new();
@@ -893,6 +904,117 @@ mod tests {
 
     fn addr(byte: u8) -> Address {
         Address::repeat_byte(byte)
+    }
+
+    fn call_trace_node(
+        idx: usize,
+        parent: Option<usize>,
+        address: Address,
+        success: bool,
+        status: InstructionResult,
+        children: Vec<usize>,
+    ) -> CallTraceNode {
+        let ordering = (0..children.len()).map(TraceMemberOrder::Call).collect();
+        CallTraceNode {
+            parent,
+            children,
+            idx,
+            trace: CallTrace {
+                success,
+                address,
+                kind: CallKind::Call,
+                status: Some(status),
+                ..Default::default()
+            },
+            ordering,
+            ..Default::default()
+        }
+    }
+
+    fn call_trace_arena(nodes: Vec<CallTraceNode>) -> CallTraceArena {
+        let mut arena = CallTraceArena::default();
+        *arena.nodes_mut() = nodes;
+        arena
+    }
+
+    fn trace_for_address(traces: &[DebankTrace], address: Address) -> &DebankTrace {
+        traces.iter().find(|trace| trace.to_addr == address).unwrap()
+    }
+
+    #[test]
+    fn successful_descendants_of_failed_call_are_error_traces() {
+        let arena = call_trace_arena(vec![
+            call_trace_node(0, None, addr(1), true, InstructionResult::Stop, vec![1, 4]),
+            call_trace_node(1, Some(0), addr(2), false, InstructionResult::Revert, vec![2, 3]),
+            call_trace_node(2, Some(1), addr(3), true, InstructionResult::Stop, vec![]),
+            call_trace_node(3, Some(1), addr(4), false, InstructionResult::OutOfGas, vec![]),
+            call_trace_node(4, Some(0), addr(5), true, InstructionResult::Stop, vec![]),
+        ]);
+
+        let (traces, error_traces, _, _) =
+            build_debank_traces(H256::repeat_byte(0xaa), arena, &RefCell::new(0));
+
+        assert_eq!(traces.len(), 2);
+        assert!(trace_for_address(&traces, addr(1)).error.is_empty());
+        assert!(trace_for_address(&traces, addr(5)).error.is_empty());
+
+        assert_eq!(error_traces.len(), 3);
+        assert_eq!(trace_for_address(&error_traces, addr(2)).error, "Reverted");
+        assert_eq!(trace_for_address(&error_traces, addr(3)).error, PARENT_CALL_FAILED_ERROR);
+        assert_eq!(trace_for_address(&error_traces, addr(4)).error, "Out of gas");
+    }
+
+    #[test]
+    fn failed_top_level_call_marks_successful_descendants() {
+        let arena = call_trace_arena(vec![
+            call_trace_node(0, None, addr(1), false, InstructionResult::Revert, vec![1]),
+            call_trace_node(1, Some(0), addr(2), true, InstructionResult::Stop, vec![]),
+        ]);
+
+        let (traces, error_traces, _, _) =
+            build_debank_traces(H256::repeat_byte(0xaa), arena, &RefCell::new(0));
+
+        assert!(traces.is_empty());
+        assert_eq!(error_traces.len(), 2);
+        assert_eq!(trace_for_address(&error_traces, addr(1)).error, "Reverted");
+        assert_eq!(trace_for_address(&error_traces, addr(2)).error, PARENT_CALL_FAILED_ERROR);
+    }
+
+    #[test]
+    fn selfdestruct_under_failed_parent_is_an_error_trace() {
+        let mut selfdestruct =
+            call_trace_node(1, Some(0), addr(2), true, InstructionResult::SelfDestruct, vec![]);
+        selfdestruct.trace.selfdestruct_address = Some(addr(3));
+        selfdestruct.trace.selfdestruct_refund_target = Some(addr(4));
+        let arena = call_trace_arena(vec![
+            call_trace_node(0, None, addr(1), false, InstructionResult::Revert, vec![1]),
+            selfdestruct,
+        ]);
+
+        let (traces, error_traces, _, _) =
+            build_debank_traces(H256::repeat_byte(0xaa), arena, &RefCell::new(0));
+
+        assert!(traces.is_empty());
+        assert_eq!(error_traces.len(), 3);
+        let selfdestruct_trace = trace_for_address(&error_traces, addr(4));
+        assert_eq!(selfdestruct_trace.call_create_type, "suicide");
+        assert_eq!(selfdestruct_trace.error, PARENT_CALL_FAILED_ERROR);
+    }
+
+    #[test]
+    fn successful_call_tree_has_no_error_traces() {
+        let arena = call_trace_arena(vec![
+            call_trace_node(0, None, addr(1), true, InstructionResult::Stop, vec![1]),
+            call_trace_node(1, Some(0), addr(2), true, InstructionResult::Stop, vec![2]),
+            call_trace_node(2, Some(1), addr(3), true, InstructionResult::Stop, vec![]),
+        ]);
+
+        let (traces, error_traces, _, _) =
+            build_debank_traces(H256::repeat_byte(0xaa), arena, &RefCell::new(0));
+
+        assert_eq!(traces.len(), 3);
+        assert!(traces.iter().all(|trace| trace.error.is_empty()));
+        assert!(error_traces.is_empty());
     }
 
     fn slot(value: u64) -> U256 {
