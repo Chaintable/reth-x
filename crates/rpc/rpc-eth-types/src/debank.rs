@@ -436,8 +436,7 @@ impl From<&CallTraceNode> for DebankTrace {
             CallKind::CallCode |
             CallKind::DelegateCall |
             CallKind::AuthCall => "call".to_string(),
-            CallKind::Create => "create".to_string(),
-            CallKind::Create2 => "create2".to_string(),
+            CallKind::Create | CallKind::Create2 => "create".to_string(),
         };
         let mut call_type = "".to_string();
         if call_create_type == "call" {
@@ -1015,6 +1014,18 @@ mod tests {
         assert_eq!(traces.len(), 3);
         assert!(traces.iter().all(|trace| trace.error.is_empty()));
         assert!(error_traces.is_empty());
+    }
+
+    #[test]
+    fn create2_is_normalized_to_create() {
+        let mut node =
+            call_trace_node(0, None, addr(1), true, InstructionResult::Stop, vec![]);
+        node.trace.kind = CallKind::Create2;
+
+        let trace = DebankTrace::from(&node);
+
+        assert_eq!(trace.call_create_type, "create");
+        assert!(trace.call_type.is_empty());
     }
 
     fn slot(value: u64) -> U256 {
