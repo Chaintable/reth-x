@@ -2,6 +2,7 @@
 //!
 //! Log parsing for building filter.
 
+use crate::LogFilter;
 use alloy_consensus::TxReceipt;
 use alloy_eips::{eip2718::Encodable2718, BlockNumHash};
 use alloy_primitives::TxHash;
@@ -67,10 +68,14 @@ pub enum ProviderOrBlock<'a, P: BlockReader> {
 
 /// Appends all matching logs of a block's receipts.
 /// If the log matches, look up the corresponding transaction hash.
+///
+/// Takes a [`LogFilter`] rather than a [`Filter`] so the topic-position count is enforced here,
+/// where logs are selected. Applying it afterwards would let the caller's `max_logs_per_response`
+/// check count logs that do not actually match, and reject a query go-ethereum answers.
 pub fn append_matching_block_logs<P>(
     all_logs: &mut Vec<Log>,
     provider_or_block: ProviderOrBlock<'_, P>,
-    filter: &Filter,
+    filter: &LogFilter,
     block_num_hash: BlockNumHash,
     receipts: &[P::Receipt],
     removed: bool,
@@ -79,6 +84,10 @@ pub fn append_matching_block_logs<P>(
 where
     P: BlockReader<Transaction: SignedTransaction>,
 {
+    if !filter.matches_block(&block_num_hash) {
+        return Ok(());
+    }
+
     // Tracks the index of a log in the entire block.
     let mut log_index: u64 = 0;
 
@@ -93,7 +102,7 @@ where
         let mut transaction_hash = None;
 
         for log in receipt.logs() {
-            if filter.matches(log) {
+            if filter.matches(log) && filter.matches_topic_count(log.topics()) {
                 // if this is the first match in the receipt's logs, look up the transaction hash
                 if transaction_hash.is_none() {
                     transaction_hash = match &provider_or_block {
@@ -165,7 +174,10 @@ pub fn get_filter_block_range(
 
     // we cannot query blocks that don't exist yet
     if to_block_number > info.best_number {
-        return Err(FilterBlockRangeError::BlockRangeExceedsHead);
+        return Err(FilterBlockRangeError::BlockRangeExceedsHead {
+            requested: to_block_number,
+            head: info.best_number,
+        });
     }
 
     Ok((from_block_number, to_block_number))
@@ -180,8 +192,13 @@ pub enum FilterBlockRangeError {
     #[error("invalid block range params")]
     InvalidBlockRange,
     /// Block range extends beyond current head
-    #[error("block range extends beyond current head block")]
-    BlockRangeExceedsHead,
+    #[error("block range extends beyond current head block: requested {requested}, head {head}")]
+    BlockRangeExceedsHead {
+        /// The requested `toBlock` number
+        requested: u64,
+        /// The current head block number
+        head: u64,
+    },
 }
 
 #[cfg(test)]
@@ -223,7 +240,10 @@ mod tests {
         let to = 15000002u64;
         let info = ChainInfo { best_number: 15000000, ..Default::default() };
         let err = get_filter_block_range(Some(from), Some(to), info.best_number, info).unwrap_err();
-        assert_eq!(err, FilterBlockRangeError::BlockRangeExceedsHead);
+        assert_eq!(
+            err,
+            FilterBlockRangeError::BlockRangeExceedsHead { requested: to, head: info.best_number }
+        );
     }
 
     #[test]
@@ -259,7 +279,10 @@ mod tests {
         let to = 200;
         let info = ChainInfo { best_number: 150, ..Default::default() };
         let err = get_filter_block_range(Some(from), Some(to), 0, info).unwrap_err();
-        assert_eq!(err, FilterBlockRangeError::BlockRangeExceedsHead);
+        assert_eq!(
+            err,
+            FilterBlockRangeError::BlockRangeExceedsHead { requested: to, head: info.best_number }
+        );
     }
 
     #[test]

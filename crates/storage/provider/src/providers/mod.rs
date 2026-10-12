@@ -17,10 +17,10 @@ mod state;
 pub use state::{
     historical::{
         compute_history_rank, history_info, needs_prev_shard_check, HistoricalStateProvider,
-        HistoricalStateProviderRef, HistoryInfo, LowestAvailableBlocks,
+        HistoricalStateProviderRef, HistoryInfo, LowestAvailableBlocks, PipelineConsistency,
     },
     latest::{LatestStateProvider, LatestStateProviderRef},
-    overlay::{OverlayStateProvider, OverlayStateProviderFactory},
+    overlay::{OverlayBuilder, OverlayStateProvider, OverlayStateProviderFactory},
 };
 
 mod consistent_view;
@@ -32,13 +32,12 @@ pub use blockchain_provider::BlockchainProvider;
 mod consistent;
 pub use consistent::ConsistentProvider;
 
-// RocksDB currently only supported on Unix platforms
-// Windows support is planned for future releases
-#[cfg_attr(all(unix, feature = "rocksdb"), path = "rocksdb/mod.rs")]
-#[cfg_attr(not(all(unix, feature = "rocksdb")), path = "rocksdb_stub.rs")]
 pub(crate) mod rocksdb;
 
-pub use rocksdb::{RocksDBBatch, RocksDBBuilder, RocksDBProvider, RocksTx};
+pub use rocksdb::{
+    PruneShardOutcome, PrunedIndices, RocksDBBatch, RocksDBBuilder, RocksDBIter, RocksDBProvider,
+    RocksDBRawIter, RocksDBStats, RocksDBTableStats, RocksReadSnapshot, RocksTx,
+};
 
 /// Helper trait to bound [`NodeTypes`] so that combined with database they satisfy
 /// [`ProviderNodeTypes`].

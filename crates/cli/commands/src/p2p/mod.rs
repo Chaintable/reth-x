@@ -16,8 +16,10 @@ use reth_node_core::{
     args::{DatadirArgs, NetworkArgs},
     utils::get_single_header,
 };
+use reth_tasks::Runtime;
 
 pub mod bootnode;
+pub mod enode;
 pub mod rlpx;
 
 /// `reth p2p` command
@@ -74,7 +76,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     eyre::bail!(
                         "Invalid number of bodies received. Expected: 1. Received: {}",
                         result.len()
-                    )
+                    );
                 }
                 let body = result.into_iter().next().unwrap();
                 tracing::info!(target: "reth::cli", ?body, "Successfully downloaded body")
@@ -84,6 +86,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
             }
             Subcommands::Bootnode(command) => {
                 command.execute().await?;
+            }
+            Subcommands::Enode(command) => {
+                command.execute()?;
             }
         }
 
@@ -99,6 +104,7 @@ impl<C: ChainSpecParser> Command<C> {
             Subcommands::Body { args, .. } => Some(&args.chain),
             Subcommands::Rlpx(_) => None,
             Subcommands::Bootnode(_) => None,
+            Subcommands::Enode(_) => None,
         }
     }
 }
@@ -126,6 +132,8 @@ pub enum Subcommands<C: ChainSpecParser> {
     Rlpx(rlpx::Command),
     /// Bootnode command
     Bootnode(bootnode::Command),
+    /// Print enode identifier
+    Enode(enode::Command),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -177,27 +185,32 @@ impl<C: ChainSpecParser> DownloadArgs<C> {
         if config.peers.trusted_nodes.is_empty() && self.network.trusted_only {
             eyre::bail!(
                 "No trusted nodes. Set trusted peer with `--trusted-peer <enode record>` or set `--trusted-only` to `false`"
-            )
+            );
         }
 
-        config.peers.trusted_nodes_only = self.network.trusted_only;
+        config.peers.trusted_nodes_only |= self.network.trusted_only;
 
         let default_secret_key_path = data_dir.p2p_secret();
         let p2p_secret_key = self.network.secret_key(default_secret_key_path)?;
         let rlpx_socket = (self.network.addr, self.network.port).into();
-        let boot_nodes = self.chain.bootnodes().unwrap_or_default();
+        let boot_nodes = self
+            .network
+            .resolved_bootnodes()
+            .unwrap_or_else(|| self.chain.bootnodes().unwrap_or_default());
 
-        let net = NetworkConfigBuilder::<N::NetworkPrimitives>::new(p2p_secret_key)
-            .peer_config(config.peers_config_with_basic_nodes_from_file(None))
-            .external_ip_resolver(self.network.nat.clone())
-            .network_id(self.network.network_id)
-            .boot_nodes(boot_nodes.clone())
-            .apply(|builder| {
-                self.network.discovery.apply_to_builder(builder, rlpx_socket, boot_nodes)
-            })
-            .build_with_noop_provider(self.chain.clone())
-            .manager()
-            .await?;
+        let net =
+            NetworkConfigBuilder::<N::NetworkPrimitives>::new(p2p_secret_key, Runtime::test())
+                .peer_config(config.peers_config_with_basic_nodes_from_file(None))
+                .sessions_config(config.sessions)
+                .external_ip_resolver(self.network.nat.clone())
+                .network_id(self.network.network_id)
+                .boot_nodes(boot_nodes.clone())
+                .apply(|builder| {
+                    self.network.discovery.apply_to_builder(builder, rlpx_socket, boot_nodes)
+                })
+                .build_with_noop_provider(self.chain.clone())
+                .manager()
+                .await?;
         let handle = net.handle().clone();
         tokio::task::spawn(net);
 
@@ -224,5 +237,17 @@ mod tests {
     fn parse_body_cmd() {
         let _args: Command<EthereumChainSpecParser> =
             Command::parse_from(["reth", "body", "--chain", "mainnet", "1000"]);
+    }
+
+    #[test]
+    fn parse_enode_cmd() {
+        let _args: Command<EthereumChainSpecParser> =
+            Command::parse_from(["reth", "enode", "/tmp/secret"]);
+    }
+
+    #[test]
+    fn parse_enode_cmd_with_ip() {
+        let _args: Command<EthereumChainSpecParser> =
+            Command::parse_from(["reth", "enode", "/tmp/secret", "--ip", "192.168.1.1"]);
     }
 }

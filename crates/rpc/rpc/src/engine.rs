@@ -1,7 +1,7 @@
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, Bytes, B256, U256, U64};
 use alloy_rpc_types_eth::{
-    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Log, SyncStatus,
+    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Log, SyncStatus,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::core::RpcResult as Result;
@@ -11,8 +11,10 @@ use reth_rpc_convert::RpcTxReq;
 /// Re-export for convenience
 pub use reth_rpc_engine_api::EngineApi;
 use reth_rpc_eth_api::{
-    EngineEthFilter, FullEthApiTypes, QueryLimits, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
+    EngineEthFilter, FullEthApiTypes, LogFilter, QueryLimits, RpcBlock, RpcHeader, RpcReceipt,
+    RpcTransaction,
 };
+use serde_json::Value;
 use tracing_futures::Instrument;
 
 macro_rules! engine_span {
@@ -132,7 +134,7 @@ where
     }
 
     /// Handler for `eth_getLogs`
-    async fn logs(&self, filter: Filter) -> Result<Vec<Log>> {
+    async fn logs(&self, filter: LogFilter) -> Result<Vec<Log>> {
         self.eth_filter.logs(filter, QueryLimits::no_limits()).instrument(engine_span!()).await
     }
 
@@ -144,5 +146,23 @@ where
         block_number: Option<BlockId>,
     ) -> Result<EIP1186AccountProofResponse> {
         self.eth.get_proof(address, keys, block_number).instrument(engine_span!()).await
+    }
+
+    /// Handler for `eth_getBlockAccessListByBlockHash`
+    async fn block_access_list_by_block_hash(&self, hash: B256) -> Result<Option<Value>> {
+        self.eth.block_access_list_by_block_hash(hash).instrument(engine_span!()).await
+    }
+
+    /// Handler for `eth_getBlockAccessListByBlockNumber`
+    async fn block_access_list_by_block_number(
+        &self,
+        block_number: BlockNumberOrTag,
+    ) -> Result<Option<Value>> {
+        self.eth.block_access_list_by_block_number(block_number).instrument(engine_span!()).await
+    }
+
+    /// Handler for `getBlockAccessListRaw`
+    async fn block_access_list_raw(&self, block: BlockId) -> Result<Option<Bytes>> {
+        self.eth.block_access_list_raw(block).instrument(engine_span!()).await
     }
 }
