@@ -7,6 +7,7 @@ use crate::{
 };
 use alloy_consensus::{transaction::TxHashRef, TxReceipt};
 use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_primitives::U256;
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{Block, BlockTransactions, Index};
 use futures::Future;
@@ -75,6 +76,60 @@ fn resolved_validators_threshold(
 /// Block related functions for the [`EthApiServer`](crate::EthApiServer) trait in the
 /// `eth_` namespace.
 pub trait EthBlocks: LoadBlock<RpcConvert: RpcConvert<Primitives = Self::Primitives>> {
+    /// Returns the total difficulty at the given header, or `None` if it cannot be determined.
+    ///
+    /// Reads the stored total difficulty for the block, falling back to
+    /// `parent_td + header.difficulty` for blocks that are not in the database yet, such as the
+    /// pending block.
+    ///
+    /// `block_id` is only used for tracing context.
+    fn total_difficulty_for(
+        &self,
+        header: &SealedHeader<ProviderHeader<Self::Provider>>,
+        block_id: BlockId,
+    ) -> Option<U256> {
+        let block_number = header.number();
+        match self.provider().header_td_by_number(block_number) {
+            Ok(Some(td)) => Some(td),
+            Ok(None) | Err(_) => {
+                // Block not in database yet (e.g., pending block)
+                // Calculate TD = parent_td + current_difficulty
+                trace!(target: "rpc::eth", ?block_id, block_number, "Block not in DB, calculating TD from parent");
+
+                let parent_number = block_number.saturating_sub(1);
+                match self.provider().header_td_by_number(parent_number) {
+                    Ok(Some(parent_td)) => {
+                        let current_difficulty = header.difficulty();
+                        let calculated_td = parent_td.saturating_add(current_difficulty);
+
+                        trace!(
+                            target: "rpc::eth",
+                            ?block_id,
+                            block_number,
+                            parent_number,
+                            ?parent_td,
+                            ?current_difficulty,
+                            ?calculated_td,
+                            "Calculated TD from parent"
+                        );
+
+                        Some(calculated_td)
+                    }
+                    _ => {
+                        warn!(
+                            target: "rpc::eth",
+                            ?block_id,
+                            block_number,
+                            parent_number,
+                            "Parent TD not found, returning None"
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns the block header for the given block id.
     fn rpc_block_header(
         &self,
@@ -83,7 +138,18 @@ pub trait EthBlocks: LoadBlock<RpcConvert: RpcConvert<Primitives = Self::Primiti
     where
         Self: FullEthApiTypes,
     {
-        async move { Ok(self.rpc_block(block_id, false).await?.map(|block| block.header)) }
+        async move {
+            let Some(block) = self.recovered_block(block_id).await? else { return Ok(None) };
+            let header = block.clone_sealed_header();
+            // go-bsc's `rpcMarshalHeader` always attaches the total difficulty, so every header
+            // response carries it — unlike `rpcMarshalBlock`, which only does so when transactions
+            // are included. Passing `None` here left `eth_getHeaderByHash`,
+            // `eth_getHeaderByNumber` and `eth_getFinalizedHeader` without the field while
+            // `eth_getBlockByHash` returned it for the very same block.
+            let td = self.total_difficulty_for(&header, block_id);
+            let header = self.converter().convert_header(header, block.rlp_length(), td)?;
+            Ok(Some(header))
+        }
     }
 
     /// Returns the populated rpc block object for the given block id.
@@ -105,48 +171,7 @@ pub trait EthBlocks: LoadBlock<RpcConvert: RpcConvert<Primitives = Self::Primiti
                 full.into(),
                 |tx, tx_info| self.converter().fill(tx, tx_info),
                 |header, size| {
-                    let block_number = header.number();
-                    let td = match self.provider().header_td_by_number(block_number) {
-                        Ok(Some(td)) => {
-                            Some(td)
-                        }
-                        Ok(None) | Err(_) => {
-                            // Block not in database yet (e.g., pending block)
-                            // Calculate TD = parent_td + current_difficulty
-                            trace!(target: "rpc::eth", ?block_id, block_number, "Block not in DB, calculating TD from parent");
-
-                            let parent_number = block_number.saturating_sub(1);
-                            match self.provider().header_td_by_number(parent_number) {
-                                Ok(Some(parent_td)) => {
-                                    let current_difficulty = header.difficulty();
-                                    let calculated_td = parent_td.saturating_add(current_difficulty);
-
-                                    trace!(
-                                        target: "rpc::eth", 
-                                        ?block_id,
-                                        block_number,
-                                        parent_number,
-                                        ?parent_td,
-                                        ?current_difficulty,
-                                        ?calculated_td,
-                                        "Calculated TD from parent"
-                                    );
-
-                                    Some(calculated_td)
-                                }
-                                _ => {
-                                    warn!(
-                                        target: "rpc::eth",
-                                        ?block_id,
-                                        block_number,
-                                        parent_number,
-                                        "Parent TD not found, returning None"
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                    };
+                    let td = self.total_difficulty_for(&header, block_id);
                     self.converter().convert_header(header, size, td)
                 },
             )?;
@@ -405,6 +430,10 @@ pub trait EthBlocks: LoadBlock<RpcConvert: RpcConvert<Primitives = Self::Primiti
     {
         async move {
             if block_id.is_pending() {
+                if self.pending_block_kind().is_none() {
+                    return Ok(None);
+                }
+
                 // First, try to get the pending block from the provider, in case we already
                 // received the actual pending block from the CL.
                 if let Some((block, receipts)) = self
@@ -464,18 +493,11 @@ pub trait EthBlocks: LoadBlock<RpcConvert: RpcConvert<Primitives = Self::Primiti
     ) -> impl Future<Output = Result<Option<RpcBlock<Self::NetworkTypes>>, Self::Error>> + Send
     {
         async move {
-            let uncles = if block_id.is_pending() {
-                // Pending block can be fetched directly without need for caching
-                self.provider()
-                    .pending_block()
-                    .map_err(Self::Error::from_eth_err)?
-                    .and_then(|block| block.body().ommers().map(|o| o.to_vec()))
-            } else {
-                self.recovered_block(block_id)
-                    .await?
-                    .map(|block| block.body().ommers().map(|o| o.to_vec()).unwrap_or_default())
-            }
-            .unwrap_or_default();
+            let uncles = self
+                .recovered_block(block_id)
+                .await?
+                .map(|block| block.body().ommers().map(|o| o.to_vec()).unwrap_or_default())
+                .unwrap_or_default();
 
             uncles
                 .into_iter()
@@ -518,6 +540,10 @@ pub trait LoadBlock: LoadPendingBlock + SpawnBlocking + RpcNodeCoreExt {
     > + Send {
         async move {
             if block_id.is_pending() {
+                if self.pending_block_kind().is_none() {
+                    return Ok(None);
+                }
+
                 // Pending block can be fetched directly without need for caching
                 if let Some(pending_block) =
                     self.provider().pending_block().map_err(Self::Error::from_eth_err)?
@@ -568,17 +594,21 @@ mod tests {
         }
 
         let mut seen = HashSet::with_capacity(threshold.max(1));
-        let mut probabilistic_finalized = None;
+        let mut probabilistic_finalized = fast_finalized_number;
+        let mut threshold_met = false;
         for (number, beneficiary) in headers {
+            probabilistic_finalized = *number;
             seen.insert(*beneficiary);
             if seen.len() >= threshold {
-                probabilistic_finalized = Some(*number);
+                threshold_met = true;
                 break;
             }
         }
+        if !threshold_met {
+            probabilistic_finalized = fast_finalized_number;
+        }
 
-        Ok(probabilistic_finalized
-            .map_or(fast_finalized_number, |p| std::cmp::max(fast_finalized_number, p)))
+        Ok(std::cmp::max(fast_finalized_number, probabilistic_finalized))
     }
 
     #[test]

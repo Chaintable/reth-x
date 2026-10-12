@@ -57,7 +57,7 @@ jsonrpsee-types.workspace = true
 futures.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+reqwest.workspace = true
 
 # metrics
 metrics.workspace = true
@@ -71,8 +71,6 @@ schnellru.workspace = true
 rand.workspace = true
 tracing.workspace = true
 itertools.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [features]

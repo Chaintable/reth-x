@@ -117,7 +117,7 @@ async fn test_filter_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    EthFilterApiClient::<Transaction>::new_filter(client, Filter::default()).await.unwrap();
+    EthFilterApiClient::<Transaction>::new_filter(client, Filter::default().into()).await.unwrap();
     EthFilterApiClient::<Transaction>::new_pending_transaction_filter(client, None).await.unwrap();
     EthFilterApiClient::<Transaction>::new_pending_transaction_filter(
         client,
@@ -127,9 +127,10 @@ where
     .unwrap();
     let id = EthFilterApiClient::<Transaction>::new_block_filter(client).await.unwrap();
     EthFilterApiClient::<Transaction>::filter_changes(client, id.clone()).await.unwrap();
-    EthFilterApiClient::<Transaction>::logs(client, Filter::default()).await.unwrap();
-    let id =
-        EthFilterApiClient::<Transaction>::new_filter(client, Filter::default()).await.unwrap();
+    EthFilterApiClient::<Transaction>::logs(client, Filter::default().into()).await.unwrap();
+    let id = EthFilterApiClient::<Transaction>::new_filter(client, Filter::default().into())
+        .await
+        .unwrap();
     EthFilterApiClient::<Transaction>::filter_logs(client, id.clone()).await.unwrap();
     EthFilterApiClient::<Transaction>::uninstall_filter(client, id).await.unwrap();
 }
@@ -441,10 +442,10 @@ where
 {
     let block_id = BlockId::Number(BlockNumberOrTag::default());
 
-    DebugApiClient::<TransactionRequest>::raw_header(client, block_id).await.unwrap();
+    DebugApiClient::<TransactionRequest>::raw_header(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::raw_block(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::raw_transaction(client, B256::default()).await.unwrap();
-    DebugApiClient::<TransactionRequest>::raw_receipts(client, block_id).await.unwrap();
+    DebugApiClient::<TransactionRequest>::raw_receipts(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::bad_blocks(client).await.unwrap();
 }
 
@@ -496,13 +497,14 @@ where
     .err()
     .unwrap();
     TraceApiClient::<TransactionRequest>::trace_block(client, block_id).await.unwrap_err();
-    TraceApiClient::<TransactionRequest>::replay_block_transactions(
+    assert!(TraceApiClient::<TransactionRequest>::replay_block_transactions(
         client,
         block_id,
         HashSet::default(),
     )
     .await
-    .unwrap_err();
+    .unwrap()
+    .is_none());
 
     TraceApiClient::<TransactionRequest>::trace_filter(client, trace_filter).await.unwrap();
 }

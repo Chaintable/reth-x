@@ -9,7 +9,6 @@ use reth_storage_api::{BytecodeReader, HashedPostStateProvider, StateProvider, S
 use reth_trie::{HashedStorage, MultiProofTargets};
 use revm::{
     database::{BundleState, InMemoryDB, State},
-    primitives::HashMap,
     state::{AccountInfo, Bytecode},
     Database, DatabaseCommit, DatabaseRef,
 };
@@ -109,8 +108,9 @@ impl reth_storage_api::StateProofProvider for StateProviderTraitObjWrapper {
         &self,
         input: reth_trie::TrieInput,
         target: reth_trie::HashedPostState,
+        mode: reth_trie::ExecutionWitnessMode,
     ) -> reth_errors::ProviderResult<Vec<alloy_primitives::Bytes>> {
-        self.0.witness(input, target)
+        self.0.witness(input, target, mode)
     }
 }
 
@@ -248,7 +248,7 @@ impl<ExtDB: DatabaseRef> DatabaseRef for StateDiffTraceDB<ExtDB> {
 }
 
 impl<ExtDB: DatabaseCommit> DatabaseCommit for StateDiffTraceDB<ExtDB> {
-    fn commit(&mut self, changes: HashMap<Address, revm::state::Account>) {
+    fn commit(&mut self, changes: revm::primitives::AddressMap<revm::state::Account>) {
         self.diff.commit(changes.clone());
         self.db.commit(changes);
     }

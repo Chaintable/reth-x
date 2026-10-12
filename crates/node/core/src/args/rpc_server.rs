@@ -4,7 +4,7 @@ use crate::args::{
     types::{MaxU32, ZeroAsNoneU64},
     GasPriceOracleArgs, RpcStateCacheArgs,
 };
-use alloy_primitives::Address;
+use alloy_primitives::map::AddressSet;
 use alloy_rpc_types_engine::JwtSecret;
 use clap::{
     builder::{PossibleValue, RangedU64ValueParser, Resettable, TypedValueParser},
@@ -15,7 +15,6 @@ use reth_cli_util::{parse_duration_from_secs_or_ms, parse_ether_value};
 use reth_rpc_eth_types::builder::config::PendingBlockKind;
 use reth_rpc_server_types::{constants, RethRpcModule, RpcModuleSelection};
 use std::{
-    collections::HashSet,
     ffi::OsStr,
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
@@ -39,6 +38,13 @@ pub(crate) const RPC_DEFAULT_MAX_REQUEST_SIZE_MB: u32 = 15;
 ///
 /// This is only relevant for very large trace responses.
 pub(crate) const RPC_DEFAULT_MAX_RESPONSE_SIZE_MB: u32 = 160;
+
+/// Default maximum number of calls in a single JSON-RPC batch request.
+///
+/// Matches go-ethereum / go-bsc `--rpc.batchrequestlimit`. A batch is one HTTP request carrying
+/// many calls, so without a count limit a single request performs unbounded work and any
+/// per-request rate limiting is trivially bypassed. `0` disables the limit.
+pub(crate) const RPC_DEFAULT_BATCH_REQUEST_LIMIT: u32 = 1000;
 
 /// Default number of incoming connections.
 ///
@@ -74,6 +80,7 @@ pub struct DefaultRpcServerArgs {
     rpc_jwtsecret: Option<JwtSecret>,
     rpc_max_request_size: MaxU32,
     rpc_max_response_size: MaxU32,
+    rpc_batch_request_limit: u32,
     rpc_max_subscriptions_per_connection: MaxU32,
     rpc_max_connections: MaxU32,
     rpc_max_tracing_requests: usize,
@@ -89,7 +96,7 @@ pub struct DefaultRpcServerArgs {
     rpc_proof_permits: usize,
     rpc_pending_block: PendingBlockKind,
     rpc_forwarder: Option<Url>,
-    builder_disallow: Option<HashSet<Address>>,
+    builder_disallow: Option<AddressSet>,
     rpc_state_cache: RpcStateCacheArgs,
     gas_price_oracle: GasPriceOracleArgs,
     rpc_send_raw_transaction_sync_timeout: Duration,
@@ -244,6 +251,12 @@ impl DefaultRpcServerArgs {
         self
     }
 
+    /// Set the default JSON-RPC batch request limit (`0` disables the limit)
+    pub const fn with_rpc_batch_request_limit(mut self, v: u32) -> Self {
+        self.rpc_batch_request_limit = v;
+        self
+    }
+
     /// Set the default max subscriptions per connection
     pub const fn with_rpc_max_subscriptions_per_connection(mut self, v: MaxU32) -> Self {
         self.rpc_max_subscriptions_per_connection = v;
@@ -335,7 +348,7 @@ impl DefaultRpcServerArgs {
     }
 
     /// Set the default builder disallow addresses
-    pub fn with_builder_disallow(mut self, v: Option<HashSet<Address>>) -> Self {
+    pub fn with_builder_disallow(mut self, v: Option<AddressSet>) -> Self {
         self.builder_disallow = v;
         self
     }
@@ -385,6 +398,7 @@ impl Default for DefaultRpcServerArgs {
             rpc_jwtsecret: None,
             rpc_max_request_size: RPC_DEFAULT_MAX_REQUEST_SIZE_MB.into(),
             rpc_max_response_size: RPC_DEFAULT_MAX_RESPONSE_SIZE_MB.into(),
+            rpc_batch_request_limit: RPC_DEFAULT_BATCH_REQUEST_LIMIT,
             rpc_max_subscriptions_per_connection: RPC_DEFAULT_MAX_SUBS_PER_CONN.into(),
             rpc_max_connections: RPC_DEFAULT_MAX_CONNECTIONS.into(),
             rpc_max_tracing_requests: constants::default_max_tracing_requests(),
@@ -484,7 +498,8 @@ pub struct RpcServerArgs {
     /// This will enforce JWT authentication for all requests coming from the consensus layer.
     ///
     /// If no path is provided, a secret will be generated and stored in the datadir under
-    /// `<DIR>/<CHAIN_ID>/jwt.hex`. For mainnet this would be `~/.reth/mainnet/jwt.hex` by default.
+    /// `<DIR>/<CHAIN_ID>/jwt.hex`. For mainnet this would be `~/.local/share/reth/mainnet/jwt.hex`
+    /// by default.
     #[arg(long = "authrpc.jwtsecret", value_name = "PATH", global = true, required = false, default_value = Resettable::from(DefaultRpcServerArgs::get_global().auth_jwtsecret.as_ref().map(|v| v.to_string_lossy().into())))]
     pub auth_jwtsecret: Option<PathBuf>,
 
@@ -518,6 +533,10 @@ pub struct RpcServerArgs {
     /// Set the maximum RPC response payload size for both HTTP and WS in megabytes.
     #[arg(long = "rpc.max-response-size", alias = "rpc-max-response-size", visible_alias = "rpc.returndata.limit", default_value_t = DefaultRpcServerArgs::get_global().rpc_max_response_size)]
     pub rpc_max_response_size: MaxU32,
+
+    /// Maximum number of calls in a single JSON-RPC batch request. Set to 0 to disable the limit.
+    #[arg(long = "rpc.batchrequestlimit", alias = "rpc-batch-request-limit", default_value_t = DefaultRpcServerArgs::get_global().rpc_batch_request_limit)]
+    pub rpc_batch_request_limit: u32,
 
     /// Set the maximum concurrent subscriptions per connection.
     #[arg(long = "rpc.max-subscriptions-per-connection", alias = "rpc-max-subscriptions-per-connection", default_value_t = DefaultRpcServerArgs::get_global().rpc_max_subscriptions_per_connection)]
@@ -621,8 +640,8 @@ pub struct RpcServerArgs {
 
     /// Path to file containing disallowed addresses, json-encoded list of strings. Block
     /// validation API will reject blocks containing transactions from these addresses.
-    #[arg(long = "builder.disallow", value_name = "PATH", value_parser = reth_cli_util::parsers::read_json_from_file::<HashSet<Address>>, default_value = Resettable::from(DefaultRpcServerArgs::get_global().builder_disallow.as_ref().map(|v| format!("{:?}", v).into())))]
-    pub builder_disallow: Option<HashSet<Address>>,
+    #[arg(long = "builder.disallow", value_name = "PATH", value_parser = reth_cli_util::parsers::read_json_from_file::<AddressSet>, default_value = Resettable::from(DefaultRpcServerArgs::get_global().builder_disallow.as_ref().map(|v| format!("{:?}", v).into())))]
+    pub builder_disallow: Option<AddressSet>,
 
     /// State cache configuration.
     #[command(flatten)]
@@ -645,8 +664,24 @@ pub struct RpcServerArgs {
     ///
     /// When enabled, transactions that fail execution will be skipped, and all subsequent
     /// transactions from the same sender will also be skipped.
-    #[arg(long = "testing.skip-invalid-transactions", default_value_t = false)]
+    #[arg(long = "testing.skip-invalid-transactions", default_value_t = true)]
     pub testing_skip_invalid_transactions: bool,
+
+    /// Override the gas limit used by `testing_buildBlockV1`.
+    ///
+    /// When set, `testing_buildBlockV1` will use this value instead of inheriting
+    /// the parent block's gas limit. Accepts short notation: K for thousand, M for
+    /// million, G for billion (e.g., 1G = 1 billion).
+    #[arg(long = "testing.gas-limit", value_name = "GAS_LIMIT", hide = true)]
+    pub testing_gas_limit: Option<u64>,
+
+    /// Force upcasting EIP-4844 blob sidecars to EIP-7594 format when Osaka is active.
+    ///
+    /// When enabled, blob transactions submitted via `eth_sendRawTransaction` with EIP-4844
+    /// sidecars will be automatically converted to EIP-7594 format if the next block is Osaka.
+    /// By default this is disabled, meaning transactions are submitted as-is.
+    #[arg(long = "rpc.force-blob-sidecar-upcasting", default_value_t = false)]
+    pub rpc_force_blob_sidecar_upcasting: bool,
 }
 
 impl RpcServerArgs {
@@ -768,6 +803,24 @@ impl RpcServerArgs {
         self.rpc_send_raw_transaction_sync_timeout = timeout;
         self
     }
+
+    /// Returns `true` if the given RPC namespace is enabled on any transport.
+    pub fn is_namespace_enabled(&self, ns: RethRpcModule) -> bool {
+        if self.http && self.http_api.as_ref().is_some_and(|api| api.contains(&ns)) {
+            return true;
+        }
+        if self.ws && self.ws_api.as_ref().is_some_and(|api| api.contains(&ns)) {
+            return true;
+        }
+        // IPC exposes all modules when enabled
+        !self.ipcdisable
+    }
+
+    /// Enables forced blob sidecar upcasting from EIP-4844 to EIP-7594 format.
+    pub const fn with_force_blob_sidecar_upcasting(mut self) -> Self {
+        self.rpc_force_blob_sidecar_upcasting = true;
+        self
+    }
 }
 
 impl Default for RpcServerArgs {
@@ -796,6 +849,7 @@ impl Default for RpcServerArgs {
             rpc_jwtsecret,
             rpc_max_request_size,
             rpc_max_response_size,
+            rpc_batch_request_limit,
             rpc_max_subscriptions_per_connection,
             rpc_max_connections,
             rpc_max_tracing_requests,
@@ -840,6 +894,7 @@ impl Default for RpcServerArgs {
             rpc_jwtsecret,
             rpc_max_request_size,
             rpc_max_response_size,
+            rpc_batch_request_limit,
             rpc_max_subscriptions_per_connection,
             rpc_max_connections,
             rpc_max_tracing_requests,
@@ -859,7 +914,9 @@ impl Default for RpcServerArgs {
             rpc_state_cache,
             gas_price_oracle,
             rpc_send_raw_transaction_sync_timeout,
-            testing_skip_invalid_transactions: false,
+            testing_skip_invalid_transactions: true,
+            testing_gas_limit: None,
+            rpc_force_blob_sidecar_upcasting: false,
         }
     }
 }
@@ -903,6 +960,28 @@ mod tests {
     struct CommandParser<T: Args> {
         #[command(flatten)]
         args: T,
+    }
+
+    #[test]
+    fn test_batch_request_limit_defaults_to_geth_parity() {
+        // go-ethereum / go-bsc `--rpc.batchrequestlimit` defaults to 1000. jsonrpsee defaults to
+        // Unlimited, so this default is what closes the gap.
+        let args = CommandParser::<RpcServerArgs>::parse_from(["reth"]).args;
+        assert_eq!(args.rpc_batch_request_limit, RPC_DEFAULT_BATCH_REQUEST_LIMIT);
+        assert_eq!(args.rpc_batch_request_limit, 1000);
+    }
+
+    #[test]
+    fn test_batch_request_limit_parses_and_zero_means_unlimited() {
+        let args =
+            CommandParser::<RpcServerArgs>::parse_from(["reth", "--rpc.batchrequestlimit", "50"])
+                .args;
+        assert_eq!(args.rpc_batch_request_limit, 50);
+
+        let unlimited =
+            CommandParser::<RpcServerArgs>::parse_from(["reth", "--rpc.batchrequestlimit", "0"])
+                .args;
+        assert_eq!(unlimited.rpc_batch_request_limit, 0);
     }
 
     #[test]
@@ -1004,6 +1083,7 @@ mod tests {
             ),
             rpc_max_request_size: 15u32.into(),
             rpc_max_response_size: 160u32.into(),
+            rpc_batch_request_limit: RPC_DEFAULT_BATCH_REQUEST_LIMIT,
             rpc_max_subscriptions_per_connection: 1024u32.into(),
             rpc_max_connections: 500u32.into(),
             rpc_max_tracing_requests: 16,
@@ -1025,6 +1105,7 @@ mod tests {
                 max_receipts: 2000,
                 max_headers: 1000,
                 max_concurrent_db_requests: 512,
+                max_cached_tx_hashes: 30_000,
             },
             gas_price_oracle: GasPriceOracleArgs {
                 blocks: 20,
@@ -1035,6 +1116,8 @@ mod tests {
             },
             rpc_send_raw_transaction_sync_timeout: std::time::Duration::from_secs(30),
             testing_skip_invalid_transactions: true,
+            testing_gas_limit: None,
+            rpc_force_blob_sidecar_upcasting: false,
         };
 
         let parsed_args = CommandParser::<RpcServerArgs>::parse_from([

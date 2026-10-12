@@ -20,6 +20,7 @@ pub mod error;
 pub mod fee_history;
 pub mod gas_oracle;
 pub mod id_provider;
+pub mod log_filter;
 pub mod logs_utils;
 pub mod pending_block;
 pub mod receipt;
@@ -29,6 +30,7 @@ pub mod tx_forward;
 pub mod utils;
 
 pub use alloy_rpc_types_eth::FillTransaction;
+pub use block::CachedTransaction;
 pub use builder::config::{EthConfig, EthFilterConfig};
 pub use cache::{
     config::EthStateCacheConfig, db::StateCacheDb, multi_consumer::MultiConsumerLruCache,
@@ -40,6 +42,7 @@ pub use gas_oracle::{
     GasCap, GasPriceOracle, GasPriceOracleConfig, GasPriceOracleResult, RPC_DEFAULT_GAS_CAP,
 };
 pub use id_provider::EthSubscriptionIdProvider;
+pub use log_filter::LogFilter;
 pub use pending_block::{PendingBlock, PendingBlockEnv, PendingBlockEnvOrigin};
 pub use transaction::{FillTransactionResult, TransactionDataAndReceipt, TransactionSource};
 pub use tx_forward::ForwardConfig;
