@@ -523,14 +523,12 @@ fn build_trace_node(
     let id = debank_node.trace.id.clone();
     let contract_id = node.execution_address();
 
-    let mut child_trace_address = Vec::new();
     for pos in node.ordering.iter() {
         match &pos {
             TraceMemberOrder::Call(i) => {
                 let child_node = &nodes[node.children[*i]];
                 let mut trace_address = trace_address.clone();
                 trace_address.push(*i);
-                child_trace_address = trace_address.clone();
                 let child_trace = build_trace_node(
                     tx_id.clone(),
                     id.clone(),
@@ -565,14 +563,19 @@ fn build_trace_node(
     // the call trace and are added as additional `TransactionTrace` objects in the
     // trace array
     if node.is_selfdestruct() {
-        child_trace_address.last_mut().map(|last| *last += 1);
+        // The synthetic selfdestruct trace is the frame's last child, so its address is
+        // the frame's own address plus the number of call children before it (parity
+        // convention). Deriving it from the last call child left frames without call
+        // children with an empty trace_address, i.e. looking like a top-level trace.
+        let mut selfdestruct_trace_address = trace_address;
+        selfdestruct_trace_address.push(node.children.len());
         debank_node.trace.subtraces += 1;
         let success = parent_success && debank_node.success;
         let mut selfdestruct_trace = DebankTrace {
             from_addr: node.trace.selfdestruct_address.unwrap_or_default(),
             to_addr: node.trace.selfdestruct_refund_target.unwrap_or_default(),
             value: node.trace.selfdestruct_transferred_value.unwrap_or_default(),
-            trace_address: child_trace_address,
+            trace_address: selfdestruct_trace_address,
             parent_trace_id: id.clone(),
             pos_in_parent_trace: debank_node.children.len(),
             tx_id: tx_id.clone(),
@@ -977,6 +980,39 @@ mod tests {
         assert_eq!(error_traces.len(), 2);
         assert_eq!(trace_for_address(&error_traces, addr(1)).error, "Reverted");
         assert_eq!(trace_for_address(&error_traces, addr(2)).error, PARENT_CALL_FAILED_ERROR);
+    }
+
+    #[test]
+    fn selfdestruct_trace_address_follows_its_frame() {
+        // Frame [0] self-destructs without call children: its selfdestruct trace must be
+        // [0, 0], not [] (which would look like a top-level trace).
+        let mut leaf =
+            call_trace_node(1, Some(0), addr(2), true, InstructionResult::SelfDestruct, vec![]);
+        leaf.trace.selfdestruct_address = Some(addr(2));
+        leaf.trace.selfdestruct_refund_target = Some(addr(10));
+        // Frame [1] self-destructs after one call child [1, 0]: its selfdestruct trace is [1, 1].
+        let mut with_child =
+            call_trace_node(2, Some(0), addr(3), true, InstructionResult::SelfDestruct, vec![3]);
+        with_child.trace.selfdestruct_address = Some(addr(3));
+        with_child.trace.selfdestruct_refund_target = Some(addr(11));
+        let arena = call_trace_arena(vec![
+            call_trace_node(0, None, addr(1), true, InstructionResult::Stop, vec![1, 2]),
+            leaf,
+            with_child,
+            call_trace_node(3, Some(2), addr(4), true, InstructionResult::Stop, vec![]),
+        ]);
+
+        let (traces, error_traces, _, _) =
+            build_debank_traces(H256::repeat_byte(0xaa), arena, &RefCell::new(0));
+
+        assert!(error_traces.is_empty());
+        let leaf_selfdestruct = trace_for_address(&traces, addr(10));
+        assert_eq!(leaf_selfdestruct.call_create_type, "suicide");
+        assert_eq!(leaf_selfdestruct.trace_address, vec![0, 0]);
+        assert_eq!(leaf_selfdestruct.parent_trace_id, trace_for_address(&traces, addr(2)).id);
+        let child_selfdestruct = trace_for_address(&traces, addr(11));
+        assert_eq!(child_selfdestruct.trace_address, vec![1, 1]);
+        assert_eq!(trace_for_address(&traces, addr(4)).trace_address, vec![1, 0]);
     }
 
     #[test]
